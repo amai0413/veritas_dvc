@@ -146,6 +146,66 @@ export async function liveVerdict(
   };
 }
 
+// Evidence (real, scraped) handed to the grounded verdict below.
+export type EvidenceDoc = { title: string; url: string; siteName?: string; excerpt: string };
+
+const EVIDENCE_SYSTEM_PROMPT = `You are Veritas. Assess a claim using ONLY the real web sources provided (these were just retrieved and scraped for you — they are NOT hypothetical).
+
+Rules:
+- Return a score 0 (strongly contradicted by the sources) to 100 (strongly supported).
+- Base the score and reasoning ONLY on what the provided sources actually say. If they conflict, reflect that in a middling score and say so.
+- In "sources", return one entry per provided source you used, copying its EXACT url and title. Set stance (-1 contradicts .. +1 supports) from what that source says, and honest reliability/relevance. Write a one-sentence summary of what it actually says and why it matters.
+- Subjective/opinion claims ARE evaluable: score by how much the sources support the stance; never dump to near-zero just for being subjective. Set verifiable=false only for gibberish/empty input.
+- Be calibrated and concise.`;
+
+// Grounded verdict: same schema, but the score and sources come from REAL
+// retrieved pages instead of the model's prior knowledge.
+export async function liveVerdictWithEvidence(
+  client: Anthropic,
+  claimText: string,
+  evidence: EvidenceDoc[],
+  opts: { effort?: Effort } = {},
+): Promise<VerdictResult> {
+  const context = evidence
+    .map(
+      (e, i) =>
+        `SOURCE ${i + 1}\nurl: ${e.url}\ntitle: ${e.title}${e.siteName ? `\nsite: ${e.siteName}` : ""}\nexcerpt: ${e.excerpt}`,
+    )
+    .join("\n\n---\n\n");
+
+  const response = await client.messages.create({
+    model: MODEL,
+    max_tokens: 4000,
+    output_config: {
+      effort: opts.effort ?? "low",
+      format: { type: "json_schema", schema: VERDICT_SCHEMA },
+    },
+    system: EVIDENCE_SYSTEM_PROMPT,
+    messages: [
+      {
+        role: "user",
+        content: `Claim to evaluate: "${claimText}"\n\nRetrieved sources:\n\n${context || "(no sources were retrieved)"}`,
+      },
+    ],
+  });
+
+  if (response.stop_reason === "refusal") throw new Error("model_refusal");
+  const textBlock = response.content.find((b) => b.type === "text");
+  if (!textBlock || textBlock.type !== "text") throw new Error("empty_response");
+  const raw = JSON.parse(textBlock.text);
+  const verifiable = raw.verifiable !== false;
+  return {
+    aiVerdict: {
+      score: Math.round(clamp(raw.score, 0, 100)),
+      reasoning: String(raw.reasoning ?? ""),
+      verifiable,
+    },
+    sources: verifiable ? mapSources(raw.sources) : [],
+    promptTokens: response.usage?.input_tokens ?? 0,
+    completionTokens: response.usage?.output_tokens ?? 0,
+  };
+}
+
 // Deterministic mock used when there's no key or a call fails — always renderable.
 export function mockVerdict(claim: string): {
   aiVerdict: { score: number; reasoning: string; verifiable: boolean };

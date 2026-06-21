@@ -117,6 +117,15 @@ export async function POST(request: Request) {
             s.setAttribute(OI.TOK_TOTAL, r.promptTokens + r.completionTokens);
             s.setStatus({ code: SpanStatusCode.OK });
             return r;
+          } catch (e) {
+            // Label the span even on failure so it never lands as an empty UNKNOWN.
+            s.setAttribute(OI.SPAN_KIND, "LLM");
+            s.setAttribute(OI.LLM_PROVIDER, "anthropic");
+            s.setAttribute(OI.LLM_MODEL, MODEL);
+            s.setAttribute(OI.INPUT_VALUE, claimText);
+            s.recordException(e as Error);
+            s.setStatus({ code: SpanStatusCode.ERROR });
+            throw e;
           } finally {
             s.end();
           }

@@ -1,0 +1,92 @@
+[
+  {
+    "id": "0bc731f3-c3bd-4b7a-82aa-4f3b506c6ff3",
+    "created_at": "2026-06-21T17:48:41Z",
+    "updated_at": "2026-06-21T17:48:41Z",
+    "additional_properties": {
+      "category": "fact-false",
+      "input": "The Earth is flat."
+    }
+  },
+  {
+    "id": "137f0b33-6559-43f2-8a99-89bca7dd2813",
+    "created_at": "2026-06-21T17:48:41Z",
+    "updated_at": "2026-06-21T17:48:41Z",
+    "additional_properties": {
+      "category": "fact-true",
+      "input": "The Earth orbits the Sun."
+    }
+  },
+  {
+    "id": "53d7930a-1741-46ac-9940-910260bacb3e",
+    "created_at": "2026-06-21T17:48:41Z",
+    "updated_at": "2026-06-21T17:48:41Z",
+    "additional_properties": {
+      "category": "opinion",
+      "input": "Pineapple belongs on pizza."
+    }
+  },
+  {
+    "id": "66a5f0b6-d13b-4295-ad79-3d9afc4b0b54",
+    "created_at": "2026-06-21T17:48:41Z",
+    "updated_at": "2026-06-21T17:48:41Z",
+    "additional_properties": {
+      "category": "opinion",
+      "input": "Remote work is more productive than working in an office."
+    }
+  },
+  {
+    "id": "78fe9dfa-6ed4-4c2d-9cde-e471a6016d3b",
+    "created_at": "2026-06-21T17:48:41Z",
+    "updated_at": "2026-06-21T17:48:41Z",
+    "additional_properties": {
+      "category": "opinion",
+      "input": "Hackathons are fun."
+    }
+  },
+  {
+    "id": "8663c3ec-8899-4772-8ec8-24c03b6acbd2",
+    "created_at": "2026-06-21T17:48:41Z",
+    "updated_at": "2026-06-21T17:48:41Z",
+    "additional_properties": {
+      "category": "contested",
+      "input": "Coffee is good for your health."
+    }
+  },
+  {
+    "id": "8ad89f27-9bd8-4f7f-86cd-4b05dc7a1de2",
+    "created_at": "2026-06-21T17:48:41Z",
+    "updated_at": "2026-06-21T17:48:41Z",
+    "additional_properties": {
+      "category": "gibberish",
+      "input": "asdf qwer zxcv."
+    }
+  },
+  {
+    "id": "ad40588c-ffcf-496b-908e-810398d5a8dd",
+    "created_at": "2026-06-21T17:48:41Z",
+    "updated_at": "2026-06-21T17:48:41Z",
+    "additional_properties": {
+      "category": "fact-true",
+      "input": "Water boils at 100 degrees Celsius at sea level."
+    }
+  },
+  {
+    "id": "cc6d8a82-885f-4c5d-993b-b33578fc7ee4",
+    "created_at": "2026-06-21T17:48:41Z",
+    "updated_at": "2026-06-21T17:48:41Z",
+    "additional_properties": {
+      "category": "fact-false",
+      "input": "Humans only use 10 percent of their brains."
+    }
+  },
+  {
+    "id": "e2e65836-fdb6-4da2-b9b8-021ac09bfb6b",
+    "created_at": "2026-06-21T17:48:41Z",
+    "updated_at": "2026-06-21T17:48:41Z",
+    "additional_properties": {
+      "category": "fact-false",
+      "input": "Vaccines cause autism."
+    }
+  }
+]
