@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+ENV/
+.venv
+
+# Environment variables
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+*.tmp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Ngrok
+ngrok.exe
+ngrok.yml
+
+# Local files
+*.bat
+*.cmd
