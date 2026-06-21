@@ -47,6 +47,12 @@ export const STATUS_META: Record<
     text: "text-slate-600",
     accent: "#64748b",
   },
+  opinion: {
+    label: "Opinion",
+    chip: "bg-violet-50 border-violet-200",
+    text: "text-violet-700",
+    accent: "#7c3aed",
+  },
 };
 
 // Color a 0-100 credibility score along a red -> amber -> green ramp.

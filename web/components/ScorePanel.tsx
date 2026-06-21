@@ -36,7 +36,8 @@ function Meter({
 // "Bottom line first" — the verdict badge, the blended score, and one sentence.
 export default function ScorePanel({ claim }: { claim: Claim }) {
   const final = claim.finalScore;
-  const color = scoreColor(final);
+  const isOpinion = claim.status === "opinion";
+  const color = isOpinion ? "#7c3aed" : scoreColor(final);
   const { weights, voteCount } = analyzeVotes(claim.votes);
   const hasVotes = voteCount > 0;
 
@@ -61,10 +62,10 @@ export default function ScorePanel({ claim }: { claim: Claim }) {
             style={{ borderColor: color, boxShadow: `0 0 30px -12px ${color}` }}
           >
             <span className="text-3xl font-bold tabular-nums" style={{ color }}>
-              {Math.round(final)}
+              {isOpinion ? "—" : Math.round(final)}
             </span>
             <span className="text-[10px] font-medium uppercase tracking-wide text-slate-400">
-              / 100
+              {isOpinion ? "no score" : "/ 100"}
             </span>
           </div>
         </div>
@@ -74,6 +75,13 @@ export default function ScorePanel({ claim }: { claim: Claim }) {
         {claim.aiVerdict.reasoning}
       </p>
 
+      {isOpinion ? (
+        <p className="mt-4 rounded-xl border border-violet-200 bg-violet-50/60 p-3 text-sm leading-relaxed text-violet-800">
+          Veritas only scores verifiable factual claims. This input is a subjective opinion, so
+          there&rsquo;s nothing to verify against evidence — no credibility score is shown.
+        </p>
+      ) : (
+      <>
       <div className="mt-5 grid gap-4 sm:grid-cols-2">
         <Meter
           label="AI evidence score"
@@ -98,6 +106,8 @@ export default function ScorePanel({ claim }: { claim: Claim }) {
         {(weights.crowd * 100).toFixed(0)}% × Crowd ({Math.round(claim.crowdScore)}). Crowd weight
         rises with vote volume.
       </p>
+      </>
+      )}
     </section>
   );
 }

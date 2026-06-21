@@ -11,7 +11,7 @@ import { STATUS_META, scoreColor, sourceMeta } from "@/lib/display";
 import EvidenceMap from "./EvidenceMap";
 
 // Order the status breakdown by how much it should worry the reader.
-const STATUS_ORDER = ["false", "disputed", "uncertain", "verified"] as const;
+const STATUS_ORDER = ["false", "disputed", "uncertain", "opinion", "verified"] as const;
 
 type VoteSet = DocumentClaim["votes"];
 

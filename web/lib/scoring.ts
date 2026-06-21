@@ -96,7 +96,11 @@ export function scoreClaim(input: ClaimInput): Claim {
   const ai = input.aiVerdict.score;
   const a = analyzeVotes(input.votes);
   const finalScore = a.weights.ai * ai + a.weights.crowd * a.crowdScore;
-  const status = determineStatus(ai, a.crowdScore, a.voteCount);
+  // Opinions / non-verifiable input get their own neutral status — never "false".
+  const status =
+    input.aiVerdict.verifiable === false
+      ? "opinion"
+      : determineStatus(ai, a.crowdScore, a.voteCount);
 
   return {
     ...input,
@@ -115,6 +119,7 @@ export function scoreDocument(claims: DocumentClaim[], summary: string): Documen
     false: 0,
     disputed: 0,
     uncertain: 0,
+    opinion: 0,
   };
 
   let weightedScore = 0;
@@ -140,6 +145,7 @@ export const VERDICT_LABEL: Record<ClaimStatus, string> = {
   false: "Contradicted",
   disputed: "Misleading",
   uncertain: "Uncertain",
+  opinion: "Opinion",
 };
 
 export const STATUS_BLURB: Record<ClaimStatus, string> = {
@@ -147,4 +153,5 @@ export const STATUS_BLURB: Record<ClaimStatus, string> = {
   false: "AI evidence and human consensus agree this is false.",
   disputed: "The AI and the crowd disagree — judge the evidence yourself.",
   uncertain: "The evidence is contested; the system is flagging this honestly.",
+  opinion: "This is an opinion or value judgment — not a factual claim evidence can prove true or false.",
 };

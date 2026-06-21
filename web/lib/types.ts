@@ -15,11 +15,11 @@ export type Source = {
 export type VoteVerdict = "true" | "false";
 export type Vote = { verdict: VoteVerdict };
 
-export type ClaimStatus = "verified" | "false" | "disputed" | "uncertain";
+export type ClaimStatus = "verified" | "false" | "disputed" | "uncertain" | "opinion";
 
 export type Claim = {
   text: string;
-  aiVerdict: { score: number; reasoning: string };
+  aiVerdict: { score: number; reasoning: string; verifiable: boolean };
   sources: Source[];
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   votes: { trusted: any[]; public: any[] };

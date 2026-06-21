@@ -31,7 +31,7 @@ export const dynamic = "force-dynamic";
 
 const MAX_DOC_CHARS = 16000; // bound payload/context size
 
-type VerdictLike = { aiVerdict: { score: number; reasoning: string }; sources: DocumentClaim["sources"] };
+type VerdictLike = { aiVerdict: { score: number; reasoning: string; verifiable: boolean }; sources: DocumentClaim["sources"] };
 
 // Turn extracted claims + their verdicts into a fully-scored document analysis.
 // A failed verdict falls back to the mock so the document still renders whole.
