@@ -715,6 +715,43 @@ pre#jsonView.show { display: block; }
   border-radius: 999px; padding: 3px 10px; font-size: 12px;
 }
 
+/* ---------- crisis triage panel ---------- */
+.triage-panel { margin-bottom: 18px; }
+.tri-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.tri-badge { font-family: var(--mono); font-size: 15px; font-weight: 700; letter-spacing: 0.02em;
+  border: 1.5px solid; border-radius: 999px; padding: 7px 16px; }
+.tri-conf { text-align: right; display: flex; flex-direction: column; line-height: 1.1; }
+.tri-conf-num { font-size: 30px; font-weight: 800; font-family: var(--mono); }
+.tri-conf-cap { font-size: 10.5px; color: var(--ink-faint); font-family: var(--mono); text-transform: uppercase; letter-spacing: 0.08em; }
+.tri-disclaimer { margin: 12px 0 0; font-size: 12.5px; color: var(--ink-dim);
+  background: color-mix(in srgb, var(--amber) 10%, transparent); border: 1px solid var(--amber-dim);
+  border-radius: var(--radius-sm); padding: 8px 12px; }
+.tri-origin { margin-top: 12px; padding: 10px 12px; border: 1px dashed var(--line); border-radius: var(--radius-sm); background: var(--panel-2); }
+.tri-origin-h { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-faint); display: block; margin-bottom: 4px; }
+.tri-origin-url { font-size: 12.5px; color: var(--teal); text-decoration: none; word-break: break-all; }
+.tri-origin-url:hover { text-decoration: underline; }
+.tri-origin-claim { font-size: 13px; color: var(--ink); margin-top: 5px; }
+.tri-summary { font-size: 14px; color: var(--ink); margin: 12px 0 4px; }
+.tri-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-top: 12px; }
+.tri-card { background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 12px 14px; }
+.tri-card-h { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--ink-faint); margin-bottom: 8px; }
+.tri-card-h.ok { color: var(--st-verified); }
+.tri-card-h.warn { color: var(--st-needs); }
+.tri-card-h.bad { color: var(--st-conflict); }
+.tri-list { margin: 0; padding-left: 18px; font-size: 13px; color: var(--ink); }
+.tri-list li { margin-bottom: 4px; }
+.tri-empty { font-size: 12.5px; color: var(--ink-faint); }
+.tri-official { font-size: 14px; font-weight: 600; margin-bottom: 8px; }
+.tri-meta { font-size: 12px; color: var(--ink-dim); margin-top: 3px; }
+.tri-todo { color: var(--ink-faint); font-style: italic; }
+.tri-reco { font-size: 13px; color: var(--ink); line-height: 1.5; }
+.tri-sub { display: flex; align-items: center; gap: 9px; padding: 6px 0; border-bottom: 1px solid var(--line-soft); }
+.tri-sub:last-child { border-bottom: 0; }
+.tri-sub-dot { width: 9px; height: 9px; border-radius: 50%; flex: 0 0 auto; }
+.tri-sub-claim { flex: 1; font-size: 13px; color: var(--ink); }
+.tri-sub-status { font-family: var(--mono); font-size: 11px; white-space: nowrap; }
+
 /* accessibility: focus + reduced motion */
 :focus-visible { outline: 2px solid var(--teal); outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) {
@@ -1075,10 +1112,12 @@ const ruleEngine = {
     return "needs_confirmation";
   },
 
-  // map coordinates: X = rumor-risk → credible signal, Y = reliability
+  // map coordinates: X = stance (disputes ◄ ► supports), Y = reliability
   toMapCoords(s, index = 0) {
-    // X: combine stance and reliability so credible+supporting sits right
-    const baseX = ((s.stance + 1) / 2) * 0.55 + s.reliability * 0.45;
+    // X: pure stance — the source disputes (left) vs supports (right) the claim.
+    // Y: source reliability (up = more reliable). The two axes are independent,
+    // so "supports but low-trust" lands bottom-right (a rumor signal).
+    const baseX = (s.stance + 1) / 2;
     const baseY = s.reliability;
     // Sources often share the same inferred type/stance. A deterministic
     // golden-angle spread keeps those circles individually visible.
@@ -1169,6 +1208,9 @@ async function autoDetectContext(claim) {
 
 // fill blank or previously auto-filled fields; never clobber manual edits
 function applyDetected(d) {
+  // store detected language + English location for localized search/output
+  state.detectedLanguage = d.language || "en";
+  state.detectedLocationEn = d.location_en || d.location || null;
   const loc = $("#locInput"), tm = $("#timeInput"), tp = $("#typeInput");
   if (d.location && (!loc.value.trim() || state.autoFilled.location)) {
     loc.value = d.location; state.autoFilled.location = true; state.clarifyAnswers.location = d.location;
@@ -1360,7 +1402,9 @@ function runAnalysis() {
     url: state.inputMode === "url" ? $("#mainInput").value.trim() : undefined,
     location: $("#locInput").value.trim() || state.clarifyAnswers.location || undefined,
     incidentTime: $("#timeInput").value.trim() || state.clarifyAnswers.time || undefined,
-    claimType: $("#typeInput").value || state.clarifyAnswers.claimType || undefined
+    claimType: $("#typeInput").value || state.clarifyAnswers.claimType || undefined,
+    language: state.detectedLanguage || undefined,
+    locationEn: state.detectedLocationEn || undefined
   };
   const claim = $("#mainInput").value.trim();
 
@@ -1418,9 +1462,13 @@ function runAnalysis() {
           inputType: context.inputType,
           input: claim,
           context: {
+            inputType: context.inputType,
+            url: context.url,
             location: context.location,
+            location_en: context.locationEn,
             incidentTime: context.incidentTime,
-            claimType: context.claimType
+            claimType: context.claimType,
+            language: context.language
           }
         })
       });
@@ -1428,7 +1476,10 @@ function runAnalysis() {
     } catch (err) { clearTimeout(watchdog); return showBackendError(err); }
 
     function handleEvent(evt) {
-      if (evt.stage === "search") {
+      if (evt.stage === "resolve") {
+        if (evt.status === "active") setStep(0, "active", "reading linked page…");
+        else if (evt.status === "done") setStep(0, "active", evt.claim ? "claim extracted from link" : "using link as claim");
+      } else if (evt.stage === "search") {
         if (evt.status === "active") setStep(0, "active", "gathering candidate sources…");
         else if (evt.status === "done") { setStep(0, "done", (evt.count || 0) + " sources found"); setStep(1, "active", "pulling evidence…"); }
       } else if (evt.stage === "extract") {
@@ -1471,6 +1522,7 @@ function runAnalysis() {
    RENDER RESULTS
    ============================================================ */
 function renderResults(r) {
+  renderTriage(r);
   renderRing(r.verificationConfidence, r.status);
   renderVerdict(r);
   renderMap(r);
@@ -1479,6 +1531,100 @@ function renderResults(r) {
 
   $("#resultsRoot").classList.add("show");
   $("#resultsRoot").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+/* ---- crisis triage panel (evidence-centric, not absolute truth) ---- */
+const TRIAGE_COLORS = {
+  "Verified": "var(--st-verified)",
+  "Likely true": "var(--st-verified)",
+  "Unconfirmed": "var(--st-needs)",
+  "Conflicting reports": "var(--st-conflict)",
+  "Likely false": "var(--st-low)",
+  "False": "var(--st-conflict)",
+  "Urgent but unverified": "var(--st-escalate)"
+};
+const OFFICIAL_LABELS = {
+  confirmed: "✓ Confirmed by an official source",
+  contradicted: "✗ Contradicted by an official source",
+  not_found: "— No official source found yet",
+  unclear: "? Official status unclear"
+};
+
+function renderTriage(r) {
+  const t = r.triage;
+  const host = $("#resultsRoot");
+  let panel = $("#triagePanel");
+  if (!panel) {
+    panel = document.createElement("section");
+    panel.id = "triagePanel";
+    panel.className = "panel triage-panel";
+    host.insertBefore(panel, host.firstChild);
+  }
+  if (!t || !t.status) { panel.style.display = "none"; return; }
+  panel.style.display = "block";
+
+  const color = TRIAGE_COLORS[t.status] || "var(--st-needs)";
+  const list = (arr) => arr && arr.length
+    ? `<ul class="tri-list">${arr.map(x => `<li>${escapeHtml(typeof x === "string" ? x : (x.claim || ""))}</li>`).join("")}</ul>`
+    : `<div class="tri-empty">— none —</div>`;
+
+  const subHtml = (t.subclaims && t.subclaims.length)
+    ? t.subclaims.map(s => {
+        const c = TRIAGE_COLORS[s.status] || "var(--ink-faint)";
+        return `<div class="tri-sub">
+          <span class="tri-sub-dot" style="background:${c}"></span>
+          <span class="tri-sub-claim">${escapeHtml(s.claim || "")}</span>
+          <span class="tri-sub-status" style="color:${c}">${escapeHtml(s.status || "")} · ${Math.round(s.confidence || 0)}</span>
+        </div>`;
+      }).join("")
+    : `<div class="tri-empty">No sub-claims extracted.</div>`;
+
+  const silenceColor = { low: "var(--st-verified)", medium: "var(--st-needs)", high: "var(--st-escalate)" }[t.officialSilenceRisk] || "var(--ink-faint)";
+  const indep = t.mediaOnly ? "media reports only" : t.socialOnly ? "social posts only" : "mixed source types";
+
+  panel.innerHTML = `
+    <div class="panel-pad">
+      <div class="tri-head">
+        <span class="tri-badge" style="color:${color};border-color:${color};background:color-mix(in srgb, ${color} 14%, transparent)">${escapeHtml(t.status)}</span>
+        <div class="tri-conf">
+          <span class="tri-conf-num" style="color:${color}">${t.evidenceConfidence}</span>
+          <span class="tri-conf-cap">evidence confidence · 0–100</span>
+        </div>
+      </div>
+      <div class="tri-disclaimer">⚠️ ${escapeHtml(t.disclaimer)}（これは絶対的な真実判定ではなく、現時点の証拠の強さです）</div>
+      ${t.originalSource ? `<div class="tri-origin">
+        <span class="tri-origin-h">Original source (being verified)</span>
+        ${t.originalSource.url ? `<a class="tri-origin-url" href="${escapeHtml(t.originalSource.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(t.originalSource.title || t.originalSource.url)} ↗</a>` : ""}
+        ${t.resolvedClaim ? `<div class="tri-origin-claim">Extracted claim: “${escapeHtml(t.resolvedClaim)}”</div>` : ""}
+        ${t.originalSource.error ? `<div class="tri-origin-claim" style="color:var(--st-conflict)">Could not safely fetch this URL (${escapeHtml(t.originalSource.error)}).</div>` : ""}
+      </div>` : ""}
+      ${t.summary ? `<p class="tri-summary">${escapeHtml(t.summary)}</p>` : ""}
+
+      <div class="tri-grid">
+        <div class="tri-card">
+          <div class="tri-card-h">Official confirmation</div>
+          <div class="tri-official" style="color:${color}">${escapeHtml(OFFICIAL_LABELS[t.officialConfirmation] || t.officialConfirmation)}</div>
+          <div class="tri-meta">Official silence risk: <b style="color:${silenceColor}">${escapeHtml(t.officialSilenceRisk)}</b></div>
+          <div class="tri-meta">Sources: ${t.sourceCount} found · ${indep}</div>
+          <div class="tri-meta tri-todo">Source independence grouping: TODO (Phase 3)</div>
+        </div>
+        <div class="tri-card">
+          <div class="tri-card-h">Recommendation</div>
+          <div class="tri-reco">${escapeHtml(t.recommendation || "—")}</div>
+        </div>
+      </div>
+
+      <div class="tri-grid">
+        <div class="tri-card"><div class="tri-card-h ok">Confirmed facts</div>${list(t.confirmedFacts)}</div>
+        <div class="tri-card"><div class="tri-card-h warn">Unverified claims</div>${list(t.unverifiedClaims)}</div>
+        <div class="tri-card"><div class="tri-card-h bad">Contradictions</div>${list(t.contradictions)}</div>
+      </div>
+
+      <div class="tri-card">
+        <div class="tri-card-h">Sub-claim breakdown</div>
+        ${subHtml}
+      </div>
+    </div>`;
 }
 
 /* ---- confidence ring ---- */
@@ -1500,7 +1646,7 @@ function renderRing(score, status) {
   };
   requestAnimationFrame(step);
   $("#ringScore").style.color = color;
-  $("#ringCaption").textContent = "Verification confidence · 0–100";
+  $("#ringCaption").textContent = "Evidence confidence · not absolute truth";
 }
 
 /* ---- verdict / status / drivers ---- */
@@ -1530,8 +1676,8 @@ function renderVerdict(r) {
 
 /* ============================================================
    EVIDENCE MAP (SVG)
-   X = rumor risk → credible signal, Y = source reliability
-   circle area = relevance, outline = reliability, color = source type
+   X = stance (disputes ◄ ► supports the claim), Y = source reliability
+   circle size = relevance, color = source type
    ============================================================ */
 function renderMap(r) {
   const svg = $("#evidenceMap");
@@ -1560,8 +1706,8 @@ function renderMap(r) {
   svg.appendChild(make("line", { stroke:"var(--line)", "stroke-width":1.5, x1:padL, y1:padT, x2:padL, y2:padT+plotH }));
 
   // axis labels
-  const xlabL = make("text", { class:"map-axis-label", x:padL, y:H-30, "text-anchor":"start" }); xlabL.textContent = "◄ RUMOR RISK / LOW CONFIRMATION";
-  const xlabR = make("text", { class:"map-axis-label", x:padL+plotW, y:H-30, "text-anchor":"end" }); xlabR.textContent = "CREDIBLE EMERGENCY SIGNAL ►";
+  const xlabL = make("text", { class:"map-axis-label", x:padL, y:H-30, "text-anchor":"start" }); xlabL.textContent = "◄ DISPUTES THE CLAIM";
+  const xlabR = make("text", { class:"map-axis-label", x:padL+plotW, y:H-30, "text-anchor":"end" }); xlabR.textContent = "SUPPORTS THE CLAIM ►";
   svg.appendChild(xlabL); svg.appendChild(xlabR);
   // y label (rotated)
   const ylab = make("text", { class:"map-axis-label", x:0, y:0, "text-anchor":"middle", transform:`translate(16,${padT+plotH/2}) rotate(-90)` });
@@ -1570,10 +1716,10 @@ function renderMap(r) {
 
   // quadrant hints — placed at inner corners, low opacity, drawn
   // BEFORE dots so circles always sit on top of the labels
-  const q1 = make("text", { class:"map-quad-label", x:padL+plotW-6, y:padT+26, "text-anchor":"end" }); q1.textContent = "ACT-WORTHY";
-  const q2 = make("text", { class:"map-quad-label", x:padL+8, y:padT+26, "text-anchor":"start" }); q2.textContent = "RELIABLE BUT DISPUTING";
-  const q3 = make("text", { class:"map-quad-label", x:padL+8, y:padT+plotH-10, "text-anchor":"start" }); q3.textContent = "LOW-TRUST NOISE";
-  const q4 = make("text", { class:"map-quad-label", x:padL+plotW-6, y:padT+plotH-10, "text-anchor":"end" }); q4.textContent = "UNVERIFIED CLAIM";
+  const q1 = make("text", { class:"map-quad-label", x:padL+plotW-6, y:padT+26, "text-anchor":"end" }); q1.textContent = "STRONG CONFIRMATION";
+  const q2 = make("text", { class:"map-quad-label", x:padL+8, y:padT+26, "text-anchor":"start" }); q2.textContent = "STRONG REFUTATION";
+  const q3 = make("text", { class:"map-quad-label", x:padL+8, y:padT+plotH-10, "text-anchor":"start" }); q3.textContent = "LOW-TRUST DISPUTE";
+  const q4 = make("text", { class:"map-quad-label", x:padL+plotW-6, y:padT+plotH-10, "text-anchor":"end" }); q4.textContent = "UNVERIFIED RUMOR";
   [q1,q2,q3,q4].forEach(q => svg.appendChild(q));
 
   // plot points
@@ -1913,7 +2059,9 @@ const ACTION_GUIDANCE_BY_STATUS = {
 function adaptAgentResult(api, claim, context) {
   // /api/check wraps the judge response under .raw
   const j = (api && api.raw) ? api.raw : (api || {});
-  const score = Math.max(0, Math.min(100, Math.round(Number(j.score != null ? j.score : 0))));
+  // evidence_confidence is the strength of current evidence, NOT truth probability
+  const score = Math.max(0, Math.min(100, Math.round(Number(
+    j.evidence_confidence != null ? j.evidence_confidence : (j.score != null ? j.score : 0)))));
   const status = BACKEND_STATUS_MAP[j.status] || "needs_confirmation";
 
   // Keep every unique source returned by either evidence extraction or search.
@@ -1997,7 +2145,27 @@ function adaptAgentResult(api, claim, context) {
     ],
     sources,
     strongestEvidence: { supportsCredibility, reducesConfidence },
-    _mapData: sources.map((s, i) => ({ ...ruleEngine.toMapCoords(s, i), s }))
+    _mapData: sources.map((s, i) => ({ ...ruleEngine.toMapCoords(s, i), s })),
+    // ---- crisis triage layer (backend is the source of truth) ----
+    triage: {
+      status: j.triage_status || null,
+      evidenceConfidence: score,
+      summary: j.summary || j.reasoning || "",
+      subclaims: j.subclaims || [],
+      confirmedFacts: j.confirmed_facts || [],
+      unverifiedClaims: j.unverified_claims || [],
+      contradictions: j.contradictions || [],
+      officialConfirmation: j.official_confirmation || "unclear",
+      officialSilenceRisk: j.official_silence_risk || "medium",
+      officialSourcesFound: j.official_sources_found || [],
+      mediaOnly: !!j.media_only,
+      socialOnly: !!j.social_only,
+      recommendation: j.recommendation || "",
+      disclaimer: j.disclaimer || "This is evidence confidence, not absolute truth.",
+      sourceCount: ((j.sources || []).length || (j.search_results || []).length),
+      originalSource: j.original_source || null,
+      resolvedClaim: j.resolved_claim || null
+    }
   };
 }
 </script>

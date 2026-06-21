@@ -19,7 +19,10 @@ def get_headers():
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.9',
-        'Accept-Encoding': 'gzip, deflate, br',
+        # Only advertise encodings requests can decode natively. Brotli ("br")
+        # needs the optional `brotli` package; without it, br responses come back
+        # as raw compressed bytes and turn into mojibake/garbage.
+        'Accept-Encoding': 'gzip, deflate',
         'Connection': 'keep-alive',
         'Upgrade-Insecure-Requests': '1',
         'Sec-Fetch-Dest': 'document',
@@ -55,6 +58,10 @@ def extract_content(urls, max_retries=2):
                 # Check if request was successful
                 if response.status_code == 200:
                     # Parse HTML
+                    # Honor the real charset (Japanese pages are often Shift-JIS/
+                    # EUC-JP); requests falls back to ISO-8859-1 and mangles them.
+                    if not response.encoding or response.encoding.lower() == 'iso-8859-1':
+                        response.encoding = response.apparent_encoding
                     soup = BeautifulSoup(response.text, 'html.parser')
 
                     # Remove unwanted elements
@@ -187,6 +194,10 @@ def extract_with_fallbacks(urls):
                 response = requests.get(url, timeout=15, headers=headers)
 
                 if response.status_code == 200:
+                    # Honor the real charset (Japanese pages are often Shift-JIS/
+                    # EUC-JP); requests falls back to ISO-8859-1 and mangles them.
+                    if not response.encoding or response.encoding.lower() == 'iso-8859-1':
+                        response.encoding = response.apparent_encoding
                     soup = BeautifulSoup(response.text, 'html.parser')
                     for element in soup(["script", "style", "nav", "footer", "header"]):
                         element.decompose()

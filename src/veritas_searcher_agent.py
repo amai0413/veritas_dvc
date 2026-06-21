@@ -187,9 +187,14 @@ def compact_search_query(claim, incident_type=None):
         return re.sub(r"\s+", " ", query).strip()
     return " ".join(keep[:10]) or normalized
 
-def build_search_queries(claim, incident_type=None):
+def build_search_queries(claim, incident_type=None, location=None):
     normalized = normalize_search_claim(claim)
     compact = compact_search_query(normalized, incident_type)
+    # Fold the user-supplied location into the query when it isn't already in
+    # the claim, so news/GDELT search for the right place (Phase 1: context).
+    loc = (location or "").strip()
+    if loc and loc.lower() not in normalized.lower():
+        compact = f"{compact} {loc}".strip()
     queries = [normalized]
     if compact.lower() != normalized.lower():
         queries.append(compact)
@@ -307,10 +312,16 @@ def rank_results(results, claim, incident_type=None):
     )
 
 # ========== SEARCH FUNCTION (routes authoritative feeds by incident type) ==========
-def search_web(claim, search_engine='duckduckgo', incident_type=None):
+def search_web(claim, search_engine='duckduckgo', incident_type=None, location=None,
+               language=None, location_en=None):
     """Search multiple sources, routing authoritative hazard feeds by the
-    incident type (and claim keywords), always backed by the latest news."""
-    queries = build_search_queries(claim, incident_type)
+    incident type (and claim keywords), always backed by the latest news.
+    location/language (Phase 1 context) steer the news query + locale.
+    location_en is the English place name used to match English data feeds
+    (USGS/GDACS/EONET) when the claim itself is not in English."""
+    # English geo hint so hazard-feed location matching works for non-English claims
+    geo_hint = (location_en or location or "")
+    queries = build_search_queries(claim, incident_type, location)
     search_claim = queries[0]
     if search_claim != claim or len(queries) > 1:
         print(f"✏️ Search queries: {queries}")
@@ -335,17 +346,17 @@ def search_web(claim, search_engine='duckduckgo', incident_type=None):
 
     # 1) Authoritative hazard feeds, routed by incident type / keywords (no key)
     if want_eq:
-        usgs = search_usgs_earthquakes(claim)
+        usgs = search_usgs_earthquakes(claim, geo_hint)
         if usgs:
             print(f"🌎 USGS found {len(usgs)} matching events")
         all_results.extend(usgs)
     if want_disaster_feed:
         feed_type = detected_hazard if detected_hazard in EONET_CATEGORIES else itype
-        eonet = search_eonet(claim, feed_type)
+        eonet = search_eonet(claim, feed_type, geo_hint)
         if eonet:
             print(f"🛰️ NASA EONET found {len(eonet)} events")
         all_results.extend(eonet)
-        gdacs = search_gdacs(claim, itype)
+        gdacs = search_gdacs(claim, itype, geo_hint)
         if gdacs:
             print(f"🚨 GDACS found {len(gdacs)} alerts")
         all_results.extend(gdacs)
@@ -354,7 +365,7 @@ def search_web(claim, search_engine='duckduckgo', incident_type=None):
     # preserves detail; the compact/time-bounded query improves recall.
     news = []
     for query in queries:
-        news.extend(search_google_news(query))
+        news.extend(search_google_news(query, language))
     news = remove_duplicates(news)
     print(f"📰 Google News found {len(news)} unique results")
     all_results.extend(news)
@@ -500,12 +511,25 @@ def search_wikipedia(claim):
         return []
 
 # ========== GOOGLE NEWS RSS (latest articles, no API key) ==========
-def search_google_news(claim):
+# Map a coarse language hint to Google News locale params so non-US/English
+# incidents return local-language coverage (Phase 1 / Phase 4 multilingual).
+GOOGLE_NEWS_LOCALES = {
+    "ja": ("ja", "JP", "JP:ja"), "es": ("es-419", "MX", "MX:es-419"),
+    "fr": ("fr", "FR", "FR:fr"), "de": ("de", "DE", "DE:de"),
+    "it": ("it", "IT", "IT:it"), "pt": ("pt-BR", "BR", "BR:pt-419"),
+    "tl": ("en-PH", "PH", "PH:en"), "fil": ("en-PH", "PH", "PH:en"),
+    "hi": ("hi", "IN", "IN:hi"), "ar": ("ar", "EG", "EG:ar"),
+    "tr": ("tr", "TR", "TR:tr"), "el": ("el", "GR", "GR:el"),
+    "ko": ("ko", "KR", "KR:ko"), "zh": ("zh-CN", "CN", "CN:zh-Hans"),
+}
+
+def search_google_news(claim, language=None):
     """Fetch the latest news articles for a claim via Google News RSS."""
     try:
         print(f"📰 Searching Google News for: {claim}")
         query = quote(claim)
-        url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
+        hl, gl, ceid = GOOGLE_NEWS_LOCALES.get((language or "").lower(), ("en-US", "US", "US:en"))
+        url = f"https://news.google.com/rss/search?q={query}&hl={hl}&gl={gl}&ceid={ceid}"
         response = requests.get(url, headers=HTTP_HEADERS, timeout=10)
         if response.status_code != 200:
             record_provider("google_news", "degraded", 0, f"HTTP {response.status_code}")
@@ -612,7 +636,7 @@ def classify_news_publisher(publisher):
     return "news"
 
 # ========== USGS EARTHQUAKE CATALOG (authoritative ground truth, no key) ==========
-def search_usgs_earthquakes(claim):
+def search_usgs_earthquakes(claim, location_hint=None):
     """Query USGS for real earthquake events when a claim is seismic."""
     claim_lower = claim.lower()
     seismic = ["earthquake", "quake", "magnitude", "seismic", "richter", "tremor", "aftershock"]
@@ -644,7 +668,7 @@ def search_usgs_earthquakes(claim):
 
         features = r.json().get("features", [])
         # location keywords from the claim (capitalised proper nouns)
-        loc_words = location_keywords(claim)
+        loc_words = location_keywords(f"{claim} {location_hint or ''}")
 
         def to_source(f):
             p = f.get("properties", {})
@@ -689,7 +713,7 @@ EONET_CATEGORIES = {
     "other_disaster": [],  # any category
 }
 
-def search_eonet(claim, incident_type=None):
+def search_eonet(claim, incident_type=None, location_hint=None):
     """Query NASA EONET for active natural events (wildfires, volcanoes, storms, floods)."""
     try:
         print(f"🛰️ Searching NASA EONET for: {claim}")
@@ -701,7 +725,7 @@ def search_eonet(claim, incident_type=None):
             print(f"⚠️ EONET status {r.status_code}; skipping")
             return []
         events = r.json().get("events", []) or []
-        loc_words = location_keywords(claim)
+        loc_words = location_keywords(f"{claim} {location_hint or ''}")
         cats = EONET_CATEGORIES.get((incident_type or "").lower())
         results = []
         for e in events:
@@ -729,7 +753,7 @@ def search_eonet(claim, incident_type=None):
         return []
 
 # ========== GDACS (global disaster alerts — authoritative, no key) ==========
-def search_gdacs(claim, incident_type=None):
+def search_gdacs(claim, incident_type=None, location_hint=None):
     """Query the GDACS global disaster alert feed (earthquake/flood/cyclone/volcano)."""
     try:
         print(f"🚨 Searching GDACS for: {claim}")
@@ -739,7 +763,7 @@ def search_gdacs(claim, incident_type=None):
             print(f"⚠️ GDACS status {r.status_code}; skipping")
             return []
         root = ET.fromstring(r.content)
-        loc_words = location_keywords(claim)
+        loc_words = location_keywords(f"{claim} {location_hint or ''}")
         results = []
         for item in root.findall('.//item'):
             title = item.findtext('title', '') or ''
@@ -892,17 +916,21 @@ def search():
         data = request.json
         claim = data.get('claim', '').strip()
         search_engine = data.get('search_engine', 'duckduckgo')
-        incident_type = data.get('incident_type') or (data.get('context') or {}).get('claimType')
+        ctx = data.get('context') or {}
+        incident_type = data.get('incident_type') or ctx.get('claimType')
+        location = data.get('location') or ctx.get('location')
+        location_en = data.get('location_en') or ctx.get('location_en')
+        language = data.get('language') or ctx.get('language')
 
         if not claim:
             return jsonify({"error": "Please provide a claim to search for"}), 400
 
         print(f"\n{'='*50}")
-        print(f"🔍 Searching for: {claim}  (type: {incident_type or 'auto'})")
+        print(f"🔍 Searching for: {claim}  (type: {incident_type or 'auto'}, loc: {location or '-'} / en: {location_en or '-'}, lang: {language or 'en'})")
         print(f"{'='*50}")
 
         # Perform search
-        results = search_web(claim, search_engine, incident_type)
+        results = search_web(claim, search_engine, incident_type, location, language, location_en)
 
         # Never manufacture evidence for an unknown claim.
         if not results:

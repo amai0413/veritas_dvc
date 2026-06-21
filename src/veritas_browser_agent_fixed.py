@@ -3,8 +3,11 @@ from flask_cors import CORS
 import os
 import re
 import json
+import socket
+import ipaddress
 import requests
 import anthropic
+from urllib.parse import urlparse
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 
@@ -46,19 +49,34 @@ EXTRACTOR_AGENT_URL = os.environ.get(
 # ========== INITIALIZE CLAUDE ==========
 claude = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
+# ========== MODEL TIERS ==========
+# Fast/cheap model for extraction-style calls; a stronger model for the core
+# crisis-triage judgment where calibration and reasoning quality matter most.
+FAST_MODEL = os.environ.get("VERITAS_FAST_MODEL", "claude-haiku-4-5")
+TRIAGE_MODEL = os.environ.get("VERITAS_TRIAGE_MODEL", "claude-sonnet-4-6")
+
 # ========== AGENT IDENTITY ==========
 AGENT_NAME = "Veritas Judge Agent"
 AGENT_VERSION = "2.0"
 
 # ========== SEARCH FUNCTION ==========
-def search_web(claim, incident_type=None):
-    """Call the Searcher Agent to find sources (routed by incident type)"""
+def search_web(claim, incident_type=None, context=None):
+    """Call the Searcher Agent to find sources (routed by incident type + context)"""
     try:
+        context = context or {}
         print(f"🔍 Calling Searcher Agent for: {claim} (type: {incident_type or 'auto'})")
 
         response = requests.post(
             SEARCHER_AGENT_URL,
-            json={"claim": claim, "search_engine": "all", "incident_type": incident_type},
+            json={
+                "claim": claim,
+                "search_engine": "all",
+                "incident_type": incident_type,
+                "location": context.get("location"),
+                "location_en": context.get("location_en"),
+                "incident_time": context.get("incidentTime") or context.get("datetime"),
+                "language": context.get("language"),
+            },
             timeout=30
         )
 
@@ -447,7 +465,8 @@ def extract_context_fallback(claim):
                     and _is_plausible_subject_location(candidate)):
                 location = candidate
 
-    return {"location": location, "datetime": incident_time, "claim_type": claim_type}
+    return {"location": location, "location_en": location, "datetime": incident_time,
+            "claim_type": claim_type, "language": "en"}
 
 def extract_context(claim):
     """Use Claude to read the incident location, date/time, and type from the claim text."""
@@ -460,7 +479,7 @@ def extract_context(claim):
 CLAIM: "{claim}"
 
 Return exactly this shape:
-{{"location": "<the place mentioned, e.g. 'Crete, Greece'>", "datetime": "<when it happened or was reported, copied as written, e.g. '2 hours ago' or 'June 19 2026'>", "claim_type": "<one incident type from the list below>"}}
+{{"location": "<place as written in the claim's language>", "location_en": "<same place in English, e.g. 'Crete, Greece'>", "datetime": "<when it happened or was reported, copied as written>", "claim_type": "<one incident type from the list below>", "language": "<ISO 639-1 code of the claim's language, e.g. 'en','ja','es'>"}}
 
 claim_type must be exactly one of:
 - earthquake, wildfire, flood_storm, volcano, other_disaster
@@ -469,13 +488,15 @@ claim_type must be exactly one of:
 - misinformation, other
 
 Rules:
-- If the location is not stated, set location to null.
+- If the location is not stated, set location and location_en to null.
+- location_en is the English name of the place (translate/transliterate) so it can be matched against English data feeds; if already English, repeat it.
 - If no date/time is stated, set datetime to null.
+- language is the language the CLAIM is written in (not the location's language).
 - Choose the single best claim_type; use "other" if none clearly fits.
 - Output ONLY the JSON object, nothing else."""
     try:
         resp = claude.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model=FAST_MODEL,
             max_tokens=200,
             temperature=0,
             messages=[{"role": "user", "content": prompt}]
@@ -494,10 +515,14 @@ Rules:
     ctype = data.get("claim_type") or "other"
     if ctype not in VALID_CLAIM_TYPES:
         ctype = "other"
+    lang = clean(data.get("language"))
+    lang = lang.lower()[:5] if lang else "en"
     return {
         "location": clean(data.get("location")) or fallback["location"],
+        "location_en": clean(data.get("location_en")) or clean(data.get("location")) or fallback["location"],
         "datetime": clean(data.get("datetime")) or fallback["datetime"],
         "claim_type": ctype if ctype != "other" else fallback["claim_type"],
+        "language": lang,
     }
 
 # ========== JUDGE FUNCTION WITH CLAUDE ==========
@@ -562,7 +587,7 @@ claim, use Uncertain rather than guessing. Output ONLY the JSON object.
 
         # FIXED: Using the correct Claude model name
         response = claude.messages.create(
-            model="claude-haiku-4-5-20251001",  # ← CORRECT MODEL NAME
+            model=FAST_MODEL,
             max_tokens=500,
             temperature=0.3,
             messages=[
@@ -1070,6 +1095,337 @@ def build_search_results(search_results):
         for item in search_results[:12]
     ]
 
+# ========== CRISIS TRIAGE LAYER (Phase 1 + 2) ==========
+# Veritas is NOT an absolute-truth oracle. This layer separates confirmed facts,
+# unverified claims, contradictions, official confirmation, and urgent risk under
+# uncertainty. The backend is the single source of truth for the verdict; the
+# frontend only displays it.
+
+TRIAGE_STATUSES = [
+    "Verified", "Likely true", "Unconfirmed", "Conflicting reports",
+    "Likely false", "False", "Urgent but unverified",
+]
+
+# Map the richer triage status back to the legacy 4-value status so existing
+# UI paths (ring colour etc.) keep working.
+def legacy_status_from_triage(triage_status):
+    return {
+        "Verified": "Verified",
+        "Likely true": "Verified",
+        "Unconfirmed": "Uncertain",
+        "Conflicting reports": "Disputed",
+        "Likely false": "False",
+        "False": "False",
+        "Urgent but unverified": "Uncertain",
+    }.get(triage_status, "Uncertain")
+
+OFFICIAL_TYPES = {"government", "education", "research"}
+MEDIA_TYPES = {"news", "news_reputable", "fact_check"}
+SOCIAL_TYPES = {"social", "anonymous"}
+
+def official_signal(evidence):
+    """Deterministically derive official/media/social presence from source types."""
+    evidence = evidence or []
+    official = [e for e in evidence if e.get("source_type") in OFFICIAL_TYPES]
+    media = [e for e in evidence if e.get("source_type") in MEDIA_TYPES]
+    social = [e for e in evidence if e.get("source_type") in SOCIAL_TYPES]
+    return {
+        "official_sources_found": [
+            {"title": e.get("title", ""), "url": e.get("url", ""),
+             "source_type": e.get("source_type", "")}
+            for e in official
+        ][:6],
+        "media_only": bool(media) and not official and not social,
+        "social_only": bool(social) and not official and not media,
+        "_has_official": bool(official),
+    }
+
+def deterministic_assessments(claim, evidence):
+    """Per-source explainability (stance/relevance/trust), computed without the LLM."""
+    ctx = extract_context_fallback(claim)
+    return [assess_evidence_item(claim, item, ctx) for item in evidence or []]
+
+def triage_analysis(claim, context, evidence):
+    """Single structured Claude call producing the full crisis-triage verdict.
+    Returns None if unavailable so the caller can fall back to judge_claim()."""
+    if not ANTHROPIC_API_KEY:
+        return None
+    context = context or {}
+
+    ev_text = ""
+    for i, e in enumerate(evidence or []):
+        content = (e.get("content") or "")
+        if content and len(content) > 40:
+            ev_text += (
+                f"\n[{i+1}] {e.get('title', 'Untitled')} "
+                f"| type={e.get('source_type', '?')} "
+                f"| published={e.get('published') or '?'}\n{content[:1200]}\n"
+            )
+    if not ev_text:
+        ev_text = "No usable evidence was found yet."
+
+    language = (context.get('language') or 'en').strip() or 'en'
+    ctx_text = (
+        f"location={context.get('location') or 'unknown'}; "
+        f"incident_time={context.get('incidentTime') or context.get('datetime') or 'unknown'}; "
+        f"incident_type={context.get('claimType') or 'unknown'}; "
+        f"language={language}"
+    )
+
+    prompt = f"""You are Veritas, a CRISIS INFORMATION TRIAGE system. You do NOT decide absolute truth. Using ONLY the supplied evidence, you separate confirmed facts, unverified claims, contradictions, official confirmation, and urgent risk under uncertainty.
+
+CLAIM: "{claim}"
+USER CONTEXT: {ctx_text}
+
+EVIDENCE (each tagged with source type and publish time):
+{ev_text}
+
+Rules:
+- USE the context: reward evidence whose location, time and incident type MATCH the claim; discount evidence that is vague, off-location, or stale.
+- "No official source found" is NOT the same as false. Early in a disaster the official confirmation may not exist yet.
+- Use "Urgent but unverified" when the claim involves public safety, is plausible, but lacks official confirmation — do NOT dismiss it.
+- Decompose the claim into sub-claims (event occurred, location, time, magnitude/severity, casualties, infrastructure, etc.) and judge each separately.
+- A search page or a source merely repeating the query is NOT confirmation.
+- evidence_confidence is the STRENGTH OF CURRENT EVIDENCE, not a probability of truth.
+
+Scoring guide for evidence_confidence (strength of current evidence):
+- 80-100: multiple independent, reliable, on-point sources confirm it
+- 50-79: some credible support but gaps remain
+- 20-49: weak / mostly background / single weak source
+- 0-19: no usable evidence either way
+
+Return ONLY valid JSON in exactly this shape (replace each <...> with a real value):
+{{
+  "evidence_confidence": <integer 0-100 per the guide above>,
+  "triage_status": "<one of: Verified | Likely true | Unconfirmed | Conflicting reports | Likely false | False | Urgent but unverified>",
+  "summary": "<2-3 sentences>",
+  "subclaims": [{{"claim": "<sub-claim>", "status": "<Verified|Likely true|Unconfirmed|Conflicting reports|Likely false|False>", "confidence": <integer 0-100>, "evidence": "<short note>"}}],
+  "confirmed_facts": ["<facts the evidence actually confirms>"],
+  "unverified_claims": ["<parts not yet confirmed>"],
+  "contradictions": ["<conflicts between sources, if any>"],
+  "official_confirmation": "<one of: confirmed | contradicted | not_found | unclear>",
+  "official_silence_risk": "<one of: low | medium | high>",
+  "recommendation": "<what the user should do; for urgent unverified claims advise NOT sharing as confirmed and monitoring official/local emergency channels>"
+}}
+Consistency: if triage_status is Verified or Likely true, evidence_confidence should be 60+. If there is no evidence at all, use a low evidence_confidence.
+
+LANGUAGE: Write every human-readable text value — summary, recommendation, and each subclaim's claim/evidence, plus all confirmed_facts / unverified_claims / contradictions — in the language with ISO code "{language}" (the user's language). Keep the JSON keys and the enum values (triage_status, official_confirmation, official_silence_risk, subclaim status) EXACTLY as the English strings shown above — translate only the free text.
+Output ONLY the JSON object, nothing else."""
+
+    try:
+        print(f"🧭 Running crisis-triage analysis ({TRIAGE_MODEL})...", flush=True)
+        resp = claude.messages.create(
+            model=TRIAGE_MODEL,
+            max_tokens=1200,
+            temperature=0.2,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        # Robustly pull the JSON from the text block (tolerates a thinking
+        # block appearing first if adaptive thinking is ever enabled).
+        text = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text")
+        data = parse_judge_json(text or resp.content[0].text)
+    except Exception as e:
+        print(f"❌ triage_analysis error: {type(e).__name__}: {e}", flush=True)
+        return None
+
+    sig = official_signal(evidence)
+
+    ts = data.get("triage_status")
+    if ts not in TRIAGE_STATUSES:
+        ts = "Unconfirmed"
+
+    oc = data.get("official_confirmation")
+    if oc not in ("confirmed", "contradicted", "not_found", "unclear"):
+        oc = "unclear"
+    # cannot be "officially confirmed" if no official source is present
+    if not sig["_has_official"] and oc == "confirmed":
+        oc = "not_found"
+
+    osr = data.get("official_silence_risk")
+    if osr not in ("low", "medium", "high"):
+        osr = "medium"
+
+    try:
+        conf = max(0, min(100, int(data.get("evidence_confidence", 50))))
+    except (TypeError, ValueError):
+        conf = 50
+
+    def _strlist(key):
+        return [str(x).strip() for x in (data.get(key) or []) if str(x).strip()][:8]
+
+    subclaims = []
+    for s in (data.get("subclaims") or []):
+        if isinstance(s, dict) and s.get("claim"):
+            try:
+                sc_conf = max(0, min(100, int(s.get("confidence", 50))))
+            except (TypeError, ValueError):
+                sc_conf = 50
+            subclaims.append({
+                "claim": str(s.get("claim"))[:240],
+                "status": str(s.get("status") or "Unconfirmed"),
+                "confidence": sc_conf,
+                "evidence": str(s.get("evidence") or "")[:240],
+            })
+
+    return {
+        "evidence_confidence": conf,
+        "triage_status": ts,
+        "summary": str(data.get("summary") or ""),
+        "subclaims": subclaims[:8],
+        "confirmed_facts": _strlist("confirmed_facts"),
+        "unverified_claims": _strlist("unverified_claims"),
+        "contradictions": _strlist("contradictions"),
+        "official_confirmation": oc,
+        "official_silence_risk": osr,
+        "official_sources_found": sig["official_sources_found"],
+        "media_only": sig["media_only"],
+        "social_only": sig["social_only"],
+        "recommendation": str(data.get("recommendation") or ""),
+        "disclaimer": "This is evidence confidence, not absolute truth.",
+    }
+
+def run_triage(claim, context, evidence):
+    """Produce the full verdict: triage layer if available, else legacy judge."""
+    triage = triage_analysis(claim, context, evidence)
+    if triage:
+        verdict = dict(triage)
+        verdict["score"] = triage["evidence_confidence"]
+        verdict["status"] = legacy_status_from_triage(triage["triage_status"])
+        verdict["reasoning"] = triage.get("summary") or ""
+        verdict["evidence_assessments"] = deterministic_assessments(claim, evidence)
+        return verdict
+    # fallback: legacy judge (no API key / error) — still expose triage fields
+    verdict = judge_claim(claim, evidence)
+    sig = official_signal(evidence)
+    verdict.setdefault("evidence_confidence", verdict.get("score", 50))
+    verdict.setdefault("triage_status", {
+        "Verified": "Verified", "False": "False", "Disputed": "Conflicting reports",
+    }.get(verdict.get("status"), "Unconfirmed"))
+    verdict.setdefault("summary", verdict.get("reasoning", ""))
+    verdict.setdefault("subclaims", [])
+    verdict.setdefault("confirmed_facts", [])
+    verdict.setdefault("unverified_claims", [])
+    verdict.setdefault("contradictions", [])
+    verdict.setdefault("official_confirmation", "not_found" if not sig["_has_official"] else "unclear")
+    verdict.setdefault("official_silence_risk", "medium")
+    verdict.setdefault("official_sources_found", sig["official_sources_found"])
+    verdict.setdefault("media_only", sig["media_only"])
+    verdict.setdefault("social_only", sig["social_only"])
+    verdict.setdefault("recommendation", "")
+    verdict.setdefault("disclaimer", "This is evidence confidence, not absolute truth.")
+    return verdict
+
+# ========== URL MODE (Phase 2): verify the article/post, not the URL string ==========
+def looks_like_url(text):
+    return bool(re.match(r'^https?://', (text or "").strip(), re.I))
+
+def is_safe_url(url):
+    """Basic SSRF guard: http/https only, block localhost / private / reserved IPs.
+    TODO(Phase 4): also re-validate after redirects, cap response size, content-type."""
+    try:
+        p = urlparse(url)
+    except Exception:
+        return False
+    if p.scheme not in ("http", "https"):
+        return False
+    host = (p.hostname or "").lower()
+    if not host or host in ("localhost",):
+        return False
+    try:
+        for info in socket.getaddrinfo(host, None):
+            ip = ipaddress.ip_address(info[4][0])
+            if (ip.is_private or ip.is_loopback or ip.is_link_local
+                    or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
+                return False
+    except Exception:
+        return False
+    return True
+
+def _looks_like_garbage(text):
+    """True if text is mostly non-readable (undecoded/binary/mojibake)."""
+    t = text or ""
+    if len(t) < 20:
+        return True
+    bad = sum(1 for c in t if c == "�" or (ord(c) < 32 and c not in "\t\n\r"))
+    # also count chars outside common printable/letter ranges as a rough signal
+    return (bad / max(1, len(t))) > 0.10
+
+# phrases that mean the LLM could not derive a claim — never use these as the claim
+_NO_CLAIM_MARKERS = (
+    "cannot extract", "can't extract", "unable to extract", "no claim",
+    "not readable", "corrupted", "encoded", "binary data", "no coherent",
+    "抽出できません", "判読できません", "読み取れません",
+)
+
+def extract_main_claim_from_text(text, url=""):
+    """Use Claude to pull the single main verifiable claim out of page/post text.
+    Returns None when the text is unreadable or no claim can be derived."""
+    if _looks_like_garbage(text):
+        print("⚠️ extract_main_claim: content looks unreadable; skipping", flush=True)
+        return None
+    if not ANTHROPIC_API_KEY:
+        for sent in re.split(r'(?<=[.!?])\s+', re.sub(r'\s+', ' ', text or '')):
+            if len(sent) > 40:
+                return sent[:240]
+        return None
+    snippet = (text or "")[:3000]
+    prompt = (
+        "From the following article or social post, extract the single MAIN factual "
+        "claim being asserted, as one concise sentence suitable for fact-checking. "
+        "If several, choose the most important verifiable one. If the content is "
+        "unreadable or contains no factual claim, reply with exactly NO_CLAIM.\n\n"
+        f"URL: {url}\nCONTENT:\n{snippet}\n\nReturn ONLY the claim sentence (or NO_CLAIM)."
+    )
+    try:
+        resp = claude.messages.create(
+            model=FAST_MODEL, max_tokens=120, temperature=0,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        out = resp.content[0].text.strip().strip('"').strip()
+    except Exception as e:
+        print(f"⚠️ extract_main_claim_from_text error: {e}", flush=True)
+        return None
+    low = out.lower()
+    if not out or "no_claim" in low or any(m in low for m in _NO_CLAIM_MARKERS):
+        return None
+    return out
+
+def normalize_source_url(url):
+    """Rewrite known JS-rendered mirrors to a static-HTML equivalent so the
+    extractor can actually read the body. (itest.5ch.io renders posts via JS;
+    the canonical {server}.5ch.net read.cgi serves them server-side.)"""
+    m = re.match(r'https?://itest\.5ch\.io/([^/]+)/test/read\.cgi/(\w+)/(\d+)', url or "")
+    if m:
+        server, board, tid = m.groups()
+        return f"https://{server}.5ch.net/test/read.cgi/{board}/{tid}/"
+    return url
+
+def resolve_url_claim(url):
+    """Fetch a pasted URL, extract its body, and derive the main claim to verify.
+    Returns an original_source dict (never raises)."""
+    fetch_url = normalize_source_url(url)  # display the pasted URL, fetch the readable one
+    if not is_safe_url(fetch_url):
+        return {"url": url, "title": url, "main_claim": None, "excerpt": "",
+                "error": "blocked_or_invalid_url"}
+    content, title = "", url
+    try:
+        r = requests.post(EXTRACTOR_AGENT_URL, json={"urls": [fetch_url], "method": "basic"}, timeout=30)
+        if r.status_code == 200:
+            ev = (r.json().get("evidence") or [{}])
+            ev = ev[0] if ev else {}
+            content = ev.get("content", "") or ""
+            title = ev.get("title") or url
+    except Exception as e:
+        print(f"⚠️ resolve_url_claim fetch error: {e}", flush=True)
+    if not content or len(content) < 80:
+        return {"url": url, "title": title, "main_claim": None, "excerpt": content[:300],
+                "error": "no_readable_content"}
+    main_claim = extract_main_claim_from_text(content, url)
+    if not main_claim:
+        return {"url": url, "title": title, "main_claim": None, "excerpt": content[:300],
+                "error": "no_claim_found"}
+    return {"url": url, "title": title, "main_claim": main_claim, "excerpt": content[:300]}
+
 # ========== API ENDPOINTS ==========
 
 @app.route('/evaluate', methods=['POST'])
@@ -1078,7 +1434,8 @@ def evaluate():
     try:
         data = request.json
         claim = data.get('claim', '').strip()
-        incident_type = (data.get('context') or {}).get('claimType')
+        context = data.get('context') or {}
+        incident_type = context.get('claimType')
 
         if not claim or len(claim) < 3:
             return jsonify({"error": "Please enter a valid claim (at least 3 characters)"}), 400
@@ -1087,8 +1444,27 @@ def evaluate():
         print(f"📝 Evaluating: {claim}")
         print(f"{'='*50}")
 
-        # STEP 1: Search the web (routed by incident type)
-        search_results = search_web(claim, incident_type)
+        # STEP 0: URL mode — verify the linked article/post, not the URL string
+        original_source = None
+        if context.get('inputType') == 'url' or looks_like_url(claim):
+            url = (context.get('url') or claim).strip()
+            print(f"🔗 URL mode: resolving {url}")
+            original_source = resolve_url_claim(url)
+            if original_source.get('main_claim'):
+                claim = original_source['main_claim']
+                print(f"🔗 Extracted claim: {claim}")
+            else:
+                # Couldn't read a verifiable claim — don't fact-check the URL string
+                return jsonify({
+                    "error": "url_unreadable",
+                    "message": "Could not read a verifiable claim from that link "
+                               "(the page may be a discussion thread, paywalled, "
+                               "or render its text with JavaScript).",
+                    "original_source": original_source,
+                }), 200
+
+        # STEP 1: Search the web (routed by incident type + user context)
+        search_results = search_web(claim, incident_type, context)
 
         # STEP 2: Extract evidence
         evidence = extract_evidence(search_results)
@@ -1096,8 +1472,9 @@ def evaluate():
         # STEP 2.5: Make sure search snippets (USGS / news) reach the judge
         evidence = enrich_evidence_with_snippets(search_results, evidence)
 
-        # STEP 3: Judge the claim
-        verdict = judge_claim(claim, evidence)
+        # STEP 3: Crisis triage (context-aware, structured) — backend is the
+        # single source of truth for the verdict.
+        verdict = run_triage(claim, context, evidence)
         verdict["claim"] = claim
 
         # Add source information (show all evidence the judge actually saw,
@@ -1106,6 +1483,12 @@ def evaluate():
 
         # Add search results for transparency
         verdict["search_results"] = build_search_results(search_results)
+
+        # URL mode: keep the pasted source separate from the verification sources
+        if original_source:
+            verdict["original_source"] = original_source
+            verdict["verification_sources"] = verdict["sources"]
+            verdict["resolved_claim"] = claim
 
         print(f"✅ Score: {verdict['score']}/100 - {verdict['status']}")
         print(f"📚 Sources: {len(verdict['sources'])}")
@@ -1131,21 +1514,42 @@ def evaluate_stream():
     """Same pipeline as /evaluate but streams real per-stage progress via SSE."""
     data = request.json or {}
     claim = (data.get('claim', '') or '').strip()
-    incident_type = (data.get('context') or {}).get('claimType')
+    context = data.get('context') or {}
+    incident_type = context.get('claimType')
 
     def sse(obj):
         return f"data: {json.dumps(obj)}\n\n"
 
     def generate():
+        nonlocal claim  # URL mode reassigns claim below; without this it's a local
         if not claim or len(claim) < 3:
             yield sse({"stage": "error", "message": "Please enter a valid claim (at least 3 characters)"})
             return
         try:
             print(f"\n{'='*50}\n📝 [stream] Evaluating: {claim}\n{'='*50}")
 
-            # STEP 1: search (routed by incident type)
+            # STEP 0: URL mode — verify the linked article/post, not the URL string
+            original_source = None
+            if context.get('inputType') == 'url' or looks_like_url(claim):
+                url = (context.get('url') or claim).strip()
+                yield sse({"stage": "resolve", "status": "active"})
+                original_source = resolve_url_claim(url)
+                if original_source.get('main_claim'):
+                    claim = original_source['main_claim']
+                    yield sse({"stage": "resolve", "status": "done", "claim": claim})
+                else:
+                    # Couldn't read a verifiable claim — stop with a clear message
+                    yield sse({"stage": "resolve", "status": "done", "claim": None})
+                    yield sse({"stage": "error",
+                               "message": "Could not read a verifiable claim from that link "
+                                          "(the page may be a discussion thread, paywalled, "
+                                          "or render its text with JavaScript).",
+                               "original_source": original_source})
+                    return
+
+            # STEP 1: search (routed by incident type + user context)
             yield sse({"stage": "search", "status": "active"})
-            search_results = search_web(claim, incident_type)
+            search_results = search_web(claim, incident_type, context)
             yield sse({"stage": "search", "status": "done", "count": len(search_results)})
 
             # STEP 2: extract (+ snippet enrichment)
@@ -1154,12 +1558,16 @@ def evaluate_stream():
             evidence = enrich_evidence_with_snippets(search_results, evidence)
             yield sse({"stage": "extract", "status": "done", "count": len(evidence)})
 
-            # STEP 3: judge
+            # STEP 3: crisis triage (context-aware, structured)
             yield sse({"stage": "judge", "status": "active"})
-            verdict = judge_claim(claim, evidence)
+            verdict = run_triage(claim, context, evidence)
             verdict["claim"] = claim
             verdict["sources"] = build_verdict_sources(claim, evidence, verdict)
             verdict["search_results"] = build_search_results(search_results)
+            if original_source:
+                verdict["original_source"] = original_source
+                verdict["verification_sources"] = verdict["sources"]
+                verdict["resolved_claim"] = claim
             yield sse({"stage": "judge", "status": "done"})
 
             print(f"✅ [stream] Score: {verdict['score']}/100 - {verdict['status']}")
