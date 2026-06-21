@@ -1,0 +1,10 @@
+{"input":"The Earth orbits the Sun.","category":"fact-true"}
+{"input":"Water boils at 100 degrees Celsius at sea level.","category":"fact-true"}
+{"input":"Vaccines cause autism.","category":"fact-false"}
+{"input":"The Earth is flat.","category":"fact-false"}
+{"input":"Humans only use 10 percent of their brains.","category":"fact-false"}
+{"input":"Hackathons are fun.","category":"opinion"}
+{"input":"Pineapple belongs on pizza.","category":"opinion"}
+{"input":"Remote work is more productive than working in an office.","category":"opinion"}
+{"input":"Coffee is good for your health.","category":"contested"}
+{"input":"asdf qwer zxcv.","category":"gibberish"}

@@ -32,6 +32,13 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [isMock, setIsMock] = useState(false);
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
+  // ---- deep check (agentic: search + scrape real sources) ----
+  const [deepLoading, setDeepLoading] = useState(false);
+  const [deepInfo, setDeepInfo] = useState<{
+    queries: string[];
+    evidence: { title: string; url: string; siteName?: string; query: string }[];
+    sourcesLive: boolean;
+  } | null>(null);
 
   // ---- article mode ----
   const [docInput, setDocInput] = useState("");
@@ -67,11 +74,51 @@ export default function Home() {
         votes: { trusted: [], public: [] },
       });
       setIsMock(Boolean(data.mock));
+      setDeepInfo(null);
       setSelectedIndex(null);
     } catch {
       setError("Network error — could not reach the analysis endpoint.");
     } finally {
       setLoading(false);
+    }
+  }
+
+  // Agentic deep check: the server finds real links, scrapes them, and grounds
+  // the verdict in those pages. Slower than a normal check, but real evidence.
+  async function deepCheck() {
+    const text = input.trim();
+    if (!text || deepLoading || loading) return;
+    setDeepLoading(true);
+    setError(null);
+    setDeepInfo(null);
+    try {
+      const res = await fetch("/api/deepcheck", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ claim: text }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setError(data.error ?? "Something went wrong.");
+        return;
+      }
+      setClaim({
+        text,
+        aiVerdict: data.aiVerdict,
+        sources: data.sources ?? [],
+        votes: { trusted: [], public: [] },
+      });
+      setIsMock(Boolean(data.mock));
+      setDeepInfo({
+        queries: data.queries ?? [],
+        evidence: data.evidence ?? [],
+        sourcesLive: Boolean(data.sourcesLive),
+      });
+      setSelectedIndex(null);
+    } catch {
+      setError("Network error — could not reach the analysis endpoint.");
+    } finally {
+      setDeepLoading(false);
     }
   }
 
@@ -116,6 +163,7 @@ export default function Home() {
     setInput(text);
     setError(null);
     setIsMock(false);
+    setDeepInfo(null);
     setSelectedIndex(null);
   }
 
@@ -213,11 +261,26 @@ export default function Home() {
                 className={`mt-2 resize-none ${INPUT}`}
               />
               <div className="mt-3 flex flex-wrap items-center gap-3">
-                <button type="button" onClick={checkClaim} disabled={loading || !input.trim()} className={CTA}>
+                <button type="button" onClick={checkClaim} disabled={loading || deepLoading || !input.trim()} className={CTA}>
                   {loading ? "Analyzing…" : "Check claim"}
+                </button>
+                <button
+                  type="button"
+                  onClick={deepCheck}
+                  disabled={loading || deepLoading || !input.trim()}
+                  title="Agent searches the web, scrapes real pages with Browserbase, and grounds the verdict in them."
+                  className="inline-flex items-center gap-2 rounded-full border border-[#d8a93f]/50 bg-white/70 px-5 py-2 text-sm font-semibold text-[#8a6a1f] backdrop-blur transition hover:bg-white disabled:opacity-50"
+                >
+                  {deepLoading ? "Searching the web…" : "🔍 Deep check (live sources)"}
                 </button>
                 <span className="text-xs text-slate-400">⌘/Ctrl + Enter</span>
               </div>
+              {deepLoading ? (
+                <p className="mt-3 rounded-xl border border-[#d8a93f]/30 bg-[#fbf3dd]/70 p-3 text-xs text-[#8a6a1f]">
+                  Agent is writing search queries, finding real links, and scraping the pages with
+                  Browserbase — this takes ~30–60s.
+                </p>
+              ) : null}
 
               {/* Demo scenarios */}
               <div className="mt-5 border-t border-white/60 pt-4">
@@ -256,6 +319,52 @@ export default function Home() {
                 ) : null}
 
                 <ScorePanel claim={scored} />
+
+                {deepInfo ? (
+                  <section className={`${CARD} p-5`}>
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-semibold text-slate-800">🔍 Live evidence</span>
+                      <span className="rounded-full bg-[#fbf3dd] px-2 py-0.5 text-[11px] font-semibold text-[#8a6a1f]">
+                        {deepInfo.sourcesLive
+                          ? `${deepInfo.evidence.length} real pages read`
+                          : "no live pages — model knowledge"}
+                      </span>
+                    </div>
+                    <p className="mt-1 text-xs text-slate-500">
+                      The agent wrote these searches, then scraped the pages below with Browserbase
+                      and grounded the verdict in them.
+                    </p>
+                    {deepInfo.queries.length ? (
+                      <div className="mt-3 flex flex-wrap gap-1.5">
+                        {deepInfo.queries.map((q, i) => (
+                          <span
+                            key={i}
+                            className="rounded-full border border-slate-200 bg-white/70 px-2.5 py-1 text-[11px] text-slate-600"
+                          >
+                            {q}
+                          </span>
+                        ))}
+                      </div>
+                    ) : null}
+                    {deepInfo.evidence.length ? (
+                      <ul className="mt-3 flex flex-col gap-1.5">
+                        {deepInfo.evidence.map((e, i) => (
+                          <li key={i} className="text-xs">
+                            <a
+                              href={e.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="font-medium text-[#8a6a1f] hover:underline"
+                            >
+                              {e.siteName || new URL(e.url).hostname.replace(/^www\./, "")}
+                            </a>
+                            <span className="text-slate-500"> — {e.title}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : null}
+                  </section>
+                ) : null}
 
                 {scored.status !== "opinion" ? (
                 <>
