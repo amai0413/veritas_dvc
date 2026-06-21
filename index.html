@@ -119,9 +119,9 @@ html, body {
 }
 
 .wrap {
-  max-width: 1240px;
+  max-width: 1180px;
   margin: 0 auto;
-  padding: 28px 22px 80px;
+  padding: 16px 18px 48px;
 }
 
 /* ---------- eyebrow / labels ---------- */
@@ -137,37 +137,80 @@ html, body {
    HERO
    ============================================================ */
 .hero {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 24px;
-  padding: 8px 4px 26px;
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+  gap: 18px;
+  min-height: 430px;
+  padding: 42px 28px 34px;
   border-bottom: 1px solid var(--line-soft);
-  margin-bottom: 26px;
+  margin-bottom: 16px;
+  text-align: center;
 }
-.hero-left { max-width: 720px; }
+.hero::before {
+  content: "";
+  position: absolute;
+  z-index: -2;
+  inset: -20%;
+  background: url("LOGO.png") center / min(76vw, 860px) auto no-repeat;
+  opacity: 0.23;
+  mix-blend-mode: screen;
+  filter: grayscale(1) brightness(2.4) contrast(1.1);
+  pointer-events: none;
+}
+.hero::after {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  inset: 0;
+  background:
+    radial-gradient(circle at center, rgba(11,15,20,0.52) 0%, rgba(11,15,20,0.78) 46%, var(--ground) 78%),
+    linear-gradient(180deg, rgba(11,15,20,0.12), var(--ground));
+  pointer-events: none;
+}
+:root[data-theme="light"] .hero::before {
+  opacity: 0.12;
+  mix-blend-mode: multiply;
+  filter: grayscale(1) contrast(1.35);
+}
+:root[data-theme="light"] .hero::after {
+  background:
+    radial-gradient(circle at center, rgba(255,255,255,0.70) 0%, rgba(238,242,247,0.88) 52%, var(--ground) 80%),
+    linear-gradient(180deg, rgba(255,255,255,0.2), var(--ground));
+}
+.hero-left {
+  max-width: 880px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
 .brandline {
   display: flex;
   align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
   gap: 12px;
-  margin-bottom: 14px;
+  margin-bottom: 18px;
 }
 .mark {
-  width: 34px; height: 34px;
-  border-radius: 9px;
-  background: linear-gradient(150deg, var(--teal), var(--teal-dim));
+  width: 44px; height: 44px;
+  border-radius: 50%;
+  background: rgba(11,15,20,0.7) url("LOGO.png") center 31% / 80px auto no-repeat;
   display: grid; place-items: center;
-  box-shadow: 0 0 0 1px rgba(54,214,195,0.3), 0 8px 24px -8px rgba(54,214,195,0.5);
+  border: 1px solid rgba(224,196,114,0.44);
+  box-shadow: 0 0 0 4px rgba(224,196,114,0.05), 0 12px 30px -12px rgba(224,196,114,0.55);
   flex: 0 0 auto;
 }
-.mark svg { width: 19px; height: 19px; }
+.mark svg { display: none; }
 .brandname {
   font-family: var(--mono);
   font-weight: 600;
-  letter-spacing: 0.02em;
-  font-size: 15px;
+  letter-spacing: 0.05em;
+  font-size: 16px;
 }
-.brandname b { color: var(--teal); font-weight: 600; }
+.brandname b { color: #e0c472; font-weight: 700; }
 .mode-chip {
   font-family: var(--mono);
   font-size: 10.5px;
@@ -180,31 +223,53 @@ html, body {
   border-radius: 999px;
 }
 .hero h1 {
-  font-size: 33px;
-  line-height: 1.1;
-  letter-spacing: -0.02em;
-  margin: 4px 0 12px;
-  font-weight: 650;
+  max-width: 900px;
+  font-size: clamp(38px, 5vw, 64px);
+  line-height: 0.99;
+  letter-spacing: -0.045em;
+  margin: 0 0 18px;
+  font-weight: 720;
+  text-wrap: balance;
+  text-shadow: 0 4px 28px rgba(0,0,0,0.5);
 }
-.hero h1 .accent { color: var(--teal); }
+.hero h1 .accent {
+  color: var(--ink);
+  text-shadow: inherit;
+}
 .hero p.lead {
-  color: var(--ink-dim);
-  font-size: 15.5px;
-  margin: 0 0 6px;
+  color: var(--ink);
+  font-size: 17px;
+  line-height: 1.55;
+  margin: 0 0 8px;
+  max-width: 760px;
 }
 .hero p.sub {
-  color: var(--ink-faint);
+  color: var(--ink-dim);
   font-size: 13.5px;
+  line-height: 1.6;
   margin: 0;
-  max-width: 620px;
+  max-width: 720px;
 }
 .hero-right {
-  text-align: right;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  text-align: center;
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: 10px;
+  letter-spacing: 0.08em;
   color: var(--ink-faint);
-  line-height: 1.8;
-  flex: 0 0 auto;
+  line-height: 1.4;
+}
+.hero-right > div {
+  padding-right: 18px;
+  border-right: 1px solid var(--line);
+}
+.hero-right > div:last-of-type {
+  padding-right: 0;
+  border-right: 0;
 }
 .hero-right .pulse {
   display: inline-block; width: 7px; height: 7px;
@@ -228,7 +293,7 @@ html, body {
   border-radius: var(--radius);
   box-shadow: var(--shadow);
 }
-.panel-pad { padding: 22px; }
+.panel-pad { padding: 18px; }
 
 .panel-head {
   display: flex; align-items: center; gap: 10px;
@@ -258,7 +323,7 @@ html, body {
 /* ============================================================
    INPUT PANEL
    ============================================================ */
-.input-panel { margin-bottom: 22px; }
+.input-panel { margin-bottom: 16px; }
 
 .tabs {
   display: inline-flex;
@@ -698,8 +763,32 @@ pre#jsonView.show { display: block; }
   .map-layout { grid-template-columns: 1fr; }
   .evidence-cols { grid-template-columns: 1fr; }
   .optional-grid { grid-template-columns: 1fr; }
-  .hero { flex-direction: column; }
-  .hero-right { text-align: left; }
+  .hero {
+    min-height: 390px;
+    padding: 34px 18px 28px;
+  }
+  .hero::before { background-size: 720px auto; }
+}
+@media (max-width: 600px) {
+  .wrap { padding: 8px 10px 32px; }
+  .hero {
+    min-height: 360px;
+    padding: 28px 10px 24px;
+    margin-bottom: 10px;
+  }
+  .hero::before { background-size: 620px auto; }
+  .hero h1 {
+    font-size: clamp(34px, 11vw, 46px);
+    line-height: 1.02;
+  }
+  .hero p.lead { font-size: 15px; }
+  .hero p.sub { font-size: 12.5px; }
+  .brandline { margin-bottom: 14px; }
+  .brandname { font-size: 14px; }
+  .hero-right { gap: 8px 10px; }
+  .hero-right > div { padding-right: 10px; }
+  .theme-toggle { margin-top: 2px; }
+  .panel-pad { padding: 14px; }
 }
 
 /* ---------- auto-detected context chips ---------- */
@@ -819,16 +908,16 @@ pre#jsonView.show { display: block; }
           <svg viewBox="0 0 24 24" fill="none"><path d="M12 2l8 3v6c0 5-3.5 8.5-8 11-4.5-2.5-8-6-8-11V5l8-3z" stroke="#04201d" stroke-width="1.8" fill="rgba(4,32,29,0.25)"/><path d="M8.5 12l2.5 2.5 4.5-5" stroke="#04201d" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </span>
         <span class="brandname"><b>Veritas</b> Crisis Mode</span>
-        <span class="mode-chip">● Crisis triage</span>
+        <span class="mode-chip">● Live triage</span>
       </div>
-      <h1>Emergency misinformation triage<br>for <span class="accent">disaster claims</span>.</h1>
-      <p class="lead">Veritas checks whether a crisis claim is verified enough to act on — before it misdirects rescue resources.</p>
-      <p class="sub">Paste a URL or a claim. Veritas gathers sources, weighs reliability with a fixed rule engine, and tells you how to handle it: monitor, request confirmation, or escalate to a human.</p>
+      <h1>Verify disaster claims<br><span class="accent">before you act.</span></h1>
+      <p class="lead">Check a claim or URL against current, reliable sources.</p>
+      <p class="sub">Know when to act, wait for confirmation, or escalate.</p>
     </div>
     <div class="hero-right">
       <div><span class="pulse"></span>SYSTEM NOMINAL</div>
-      <div>RULE ENGINE v1.0</div>
-      <div>MOCK MODE — agents offline</div>
+      <div>RULE ENGINE</div>
+      <div>LIVE SOURCES</div>
       <button id="themeToggle" class="theme-toggle" type="button" aria-label="Toggle light/dark theme">
         <span class="ti" id="themeIcon">🌙</span><span id="themeLabel">Dark</span>
       </button>

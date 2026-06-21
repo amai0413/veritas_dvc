@@ -58,6 +58,31 @@ cp .env.example .env   # then edit .env
 
 Open <http://127.0.0.1:5000>. Stop with `./stop_all.sh`.
 
+## Production deployment
+
+The production container runs all four Flask applications together:
+
+- public UI on `$PORT`
+- Searcher on internal port `5001`
+- Extractor on internal port `5002`
+- Judge on internal port `5003`
+
+Build and run locally:
+
+```bash
+docker build -t veritas-crisis-mode .
+docker run --rm -p 10000:10000 \
+  -e ANTHROPIC_API_KEY \
+  -e PHOENIX_API_KEY \
+  -e ARIZE_SPACE_ID \
+  -e PHOENIX_COLLECTOR_ENDPOINT=https://otlp.arize.com/v1/traces \
+  -e ENABLE_PHOENIX=1 \
+  veritas-crisis-mode
+```
+
+The included `render.yaml` deploys the same container on Render. Add secret
+values in the Render dashboard; never commit `.env`.
+
 ## Configuration (`.env`)
 
 | Variable | Purpose |
@@ -66,7 +91,8 @@ Open <http://127.0.0.1:5000>. Stop with `./stop_all.sh`.
 | `VERITAS_TRIAGE_MODEL` | Model for the core triage judgment (default `claude-sonnet-4-6`). |
 | `VERITAS_FAST_MODEL` | Model for extraction-style calls (default `claude-haiku-4-5`). |
 | `ENABLE_PHOENIX` | `1` to send traces to Arize/Phoenix. |
-| `PHOENIX_API_KEY`, `PHOENIX_COLLECTOR_ENDPOINT` | Arize Phoenix Cloud credentials (read by `phoenix.otel.register`). |
+| `PHOENIX_API_KEY`, `PHOENIX_COLLECTOR_ENDPOINT` | Arize/Phoenix tracing credentials and endpoint. |
+| `ARIZE_SPACE_ID` | Required Space ID when sending traces to Arize AX. |
 
 ## Services
 

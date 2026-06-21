@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: veritas-crisis-mode
+    runtime: docker
+    plan: starter
+    healthCheckPath: /health
+    autoDeployTrigger: commit
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: PHOENIX_API_KEY
+        sync: false
+      - key: ARIZE_SPACE_ID
+        sync: false
+      - key: PHOENIX_COLLECTOR_ENDPOINT
+        value: https://otlp.arize.com/v1/traces
+      - key: PHOENIX_PROJECT_NAME
+        value: veritas-crisis-mode
+      - key: ENABLE_PHOENIX
+        value: "1"
