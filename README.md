@@ -83,6 +83,8 @@ docker run --rm -p 10000:10000 \
 The included `render.yaml` deploys the same container on Render. Add secret
 values in the Render dashboard; never commit `.env`.
 
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/amai0413/veritas_dvc/tree/crisis-triage-phase1-2)
+
 ## Configuration (`.env`)
 
 | Variable | Purpose |
