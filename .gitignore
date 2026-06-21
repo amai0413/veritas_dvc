@@ -22,6 +22,8 @@ ENV/
 # Logs
 *.log
 *.tmp
+logs/
+.run/
 
 # OS
 .DS_Store
@@ -34,3 +36,6 @@ ngrok.yml
 # Local files
 *.bat
 *.cmd
+
+# Generated caches
+__pycache__/

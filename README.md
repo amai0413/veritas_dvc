@@ -1,32 +1,52 @@
-\# 🦊 Veritas - AI Truth Engine
+# Veritas
 
+Veritas is a multi-agent fact-checking interface for crisis and news claims.
+It searches current sources, extracts evidence, scores a claim, and plots each
+source by stance, reliability, and relevance.
 
+## Features
 
-\*\*Veritas\*\* is an AI-powered fact-checking system that evaluates claims using a 3-agent architecture. It finds real sources from .edu and .gov sites, extracts evidence, and uses Claude AI to return a truth score from 0-100.
+- Searcher, extractor, and judge agents
+- Live streaming pipeline progress
+- Automatic location, time, and claim-type extraction
+- Deterministic evidence scoring when no Anthropic key is configured
+- Evidence map with per-source stance and reliability
+- Relevance-proportional circle areas
 
+## Setup
 
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+```
 
-\## 🎯 Features
+Export any desired values from `.env`, then start all services:
 
+```bash
+./start_all.sh
+```
 
+Open <http://127.0.0.1:5000>.
 
-\- 🔍 \*\*Real web search\*\* - Prioritizes .edu and .gov sources
+Stop the services with:
 
-\- 📄 \*\*Content extraction\*\* - Reads full article content
+```bash
+./stop_all.sh
+```
 
-\- 🧠 \*\*AI analysis\*\* - Uses Claude AI for intelligent reasoning
+The Anthropic key is optional. Without it, Veritas uses its deterministic
+evidence scorer.
 
-\- 📊 \*\*Score 0-100\*\* - How likely the claim is true
+## Services
 
-\- 🏷️ \*\*Status badges\*\* - Verified, False, Disputed, Uncertain
+- UI backend: `5000`
+- Searcher agent: `5001`
+- Extractor agent: `5002`
+- Judge agent: `5003`
 
-\- 📚 \*\*Source transparency\*\* - Shows where evidence came from
+## Safety
 
-\- 📊 \*\*Tracing\*\* - Arize OTEL integration for monitoring
-
-
-
-\## 🏗️ Architecture
-
-
-
+Veritas is a triage aid, not an emergency authority. Confirm critical claims
+through official channels before acting.

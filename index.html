@@ -1,0 +1,2000 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Veritas Crisis Mode — Emergency misinformation triage</title>
+<style>
+/* ============================================================
+   VERITAS CRISIS MODE
+   Design notes:
+   - Palette is "field instrument": deep slate ground, not pure
+     black, so status color carries the only saturation. Signal
+     amber + teal read as "calibration" rather than "alarm red",
+     which matters for a tool that must NOT panic users.
+   - Display face: monospace-leaning grotesque feel via system
+     'ui-monospace' for labels/data (reads like a console), paired
+     with a clean sans for prose. No web fonts = loads on localhost.
+   - Signature element: the confidence ring doubles as the page's
+     focal instrument; the evidence map is the second instrument.
+   ============================================================ */
+
+:root {
+  --ground: #0b0f14;
+  --panel: #121821;
+  --panel-2: #161d28;
+  --panel-3: #1b2430;
+  --line: #232e3c;
+  --line-soft: #1a2330;
+  --ink: #e8edf3;
+  --ink-dim: #9fb0c3;
+  --ink-faint: #6c7d92;
+
+  --teal: #36d6c3;
+  --teal-dim: #1d6f68;
+  --amber: #f5b13d;
+  --amber-dim: #7a5a1c;
+  --violet: #8b8cf0;
+  --rose: #f0738a;
+  --rose-dim: #7a2f3d;
+  --green: #5ad29a;
+
+  /* status colors */
+  --st-verified: #5ad29a;
+  --st-needs: #f5b13d;
+  --st-conflict: #f0738a;
+  --st-low: #8b8cf0;
+  --st-escalate: #ff7a59;
+
+  --radius: 14px;
+  --radius-sm: 9px;
+  --shadow: 0 1px 0 rgba(255,255,255,0.03) inset, 0 18px 50px -20px rgba(0,0,0,0.7);
+
+  --mono: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", Menlo, Consolas, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, system-ui, sans-serif;
+}
+
+/* ---------- LIGHT THEME (toggle via <html data-theme="light">) ---------- */
+:root[data-theme="light"] {
+  --ground: #eef2f7;
+  --panel: #ffffff;
+  --panel-2: #f7fafc;
+  --panel-3: #eef3f8;
+  --line: #d4dde7;
+  --line-soft: #e3eaf1;
+  --ink: #16202c;
+  --ink-dim: #455364;
+  --ink-faint: #738499;
+
+  --teal: #0fb3a3;
+  --teal-dim: #0a8478;
+  --amber: #c9871f;
+  --amber-dim: #e8c98a;
+  --violet: #5a5bd6;
+  --rose: #d64560;
+  --rose-dim: #efb3bf;
+  --green: #1f9d63;
+
+  --st-verified: #1f9d63;
+  --st-needs: #c9871f;
+  --st-conflict: #d64560;
+  --st-low: #5a5bd6;
+  --st-escalate: #e0552f;
+
+  --shadow: 0 1px 2px rgba(16,24,40,0.06), 0 18px 44px -26px rgba(16,24,40,0.28);
+}
+:root[data-theme="light"] body {
+  background:
+    radial-gradient(1200px 600px at 80% -10%, rgba(15,179,163,0.10), transparent 60%),
+    radial-gradient(900px 500px at 0% 0%, rgba(90,91,214,0.07), transparent 55%),
+    var(--ground);
+}
+
+/* ---------- theme toggle button ---------- */
+.theme-toggle {
+  display: inline-flex; align-items: center; gap: 7px;
+  font-family: var(--mono); font-size: 11px; letter-spacing: 0.08em;
+  text-transform: uppercase; cursor: pointer;
+  color: var(--ink-dim); background: var(--panel-2);
+  border: 1px solid var(--line); border-radius: 999px;
+  padding: 5px 12px; margin-top: 8px; transition: all 0.15s;
+}
+.theme-toggle:hover { color: var(--ink); border-color: var(--teal); }
+.theme-toggle .ti { font-size: 13px; line-height: 1; }
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background:
+    radial-gradient(1200px 600px at 80% -10%, rgba(54,214,195,0.06), transparent 60%),
+    radial-gradient(900px 500px at 0% 0%, rgba(139,140,240,0.05), transparent 55%),
+    var(--ground);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 15px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+.wrap {
+  max-width: 1240px;
+  margin: 0 auto;
+  padding: 28px 22px 80px;
+}
+
+/* ---------- eyebrow / labels ---------- */
+.eyebrow {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+
+/* ============================================================
+   HERO
+   ============================================================ */
+.hero {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 8px 4px 26px;
+  border-bottom: 1px solid var(--line-soft);
+  margin-bottom: 26px;
+}
+.hero-left { max-width: 720px; }
+.brandline {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.mark {
+  width: 34px; height: 34px;
+  border-radius: 9px;
+  background: linear-gradient(150deg, var(--teal), var(--teal-dim));
+  display: grid; place-items: center;
+  box-shadow: 0 0 0 1px rgba(54,214,195,0.3), 0 8px 24px -8px rgba(54,214,195,0.5);
+  flex: 0 0 auto;
+}
+.mark svg { width: 19px; height: 19px; }
+.brandname {
+  font-family: var(--mono);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  font-size: 15px;
+}
+.brandname b { color: var(--teal); font-weight: 600; }
+.mode-chip {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--amber);
+  border: 1px solid var(--amber-dim);
+  background: rgba(245,177,61,0.08);
+  padding: 3px 9px;
+  border-radius: 999px;
+}
+.hero h1 {
+  font-size: 33px;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+  margin: 4px 0 12px;
+  font-weight: 650;
+}
+.hero h1 .accent { color: var(--teal); }
+.hero p.lead {
+  color: var(--ink-dim);
+  font-size: 15.5px;
+  margin: 0 0 6px;
+}
+.hero p.sub {
+  color: var(--ink-faint);
+  font-size: 13.5px;
+  margin: 0;
+  max-width: 620px;
+}
+.hero-right {
+  text-align: right;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-faint);
+  line-height: 1.8;
+  flex: 0 0 auto;
+}
+.hero-right .pulse {
+  display: inline-block; width: 7px; height: 7px;
+  border-radius: 50%; background: var(--teal);
+  box-shadow: 0 0 0 0 rgba(54,214,195,0.5);
+  animation: pulse 2.4s infinite;
+  margin-right: 6px;
+}
+@keyframes pulse {
+  0% { box-shadow: 0 0 0 0 rgba(54,214,195,0.45); }
+  70% { box-shadow: 0 0 0 7px rgba(54,214,195,0); }
+  100% { box-shadow: 0 0 0 0 rgba(54,214,195,0); }
+}
+
+/* ============================================================
+   PANEL primitive
+   ============================================================ */
+.panel {
+  background: linear-gradient(180deg, var(--panel), var(--panel-2));
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+.panel-pad { padding: 22px; }
+
+.panel-head {
+  display: flex; align-items: center; gap: 10px;
+  margin-bottom: 16px;
+}
+.panel-head .idx {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--teal);
+  border: 1px solid var(--teal-dim);
+  border-radius: 6px;
+  padding: 1px 7px;
+}
+.panel-head h2 {
+  font-size: 14px;
+  letter-spacing: 0.01em;
+  margin: 0;
+  font-weight: 600;
+}
+.panel-head .hint {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-faint);
+}
+
+/* ============================================================
+   INPUT PANEL
+   ============================================================ */
+.input-panel { margin-bottom: 22px; }
+
+.tabs {
+  display: inline-flex;
+  background: var(--ground);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 3px;
+  gap: 3px;
+  margin-bottom: 14px;
+}
+.tab {
+  font-family: var(--mono);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  color: var(--ink-dim);
+  background: transparent;
+  border: 0;
+  padding: 7px 16px;
+  border-radius: 7px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.tab.active {
+  background: var(--panel-3);
+  color: var(--ink);
+  box-shadow: 0 1px 0 rgba(255,255,255,0.04) inset;
+}
+
+.input-row { position: relative; }
+textarea#mainInput, input#mainInput {
+  width: 100%;
+  background: var(--ground);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 15px;
+  padding: 15px 16px;
+  resize: vertical;
+  min-height: 96px;
+  line-height: 1.5;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+textarea#mainInput:focus, input#mainInput:focus {
+  outline: none;
+  border-color: var(--teal-dim);
+  box-shadow: 0 0 0 3px rgba(54,214,195,0.1);
+}
+textarea#mainInput::placeholder { color: var(--ink-faint); }
+
+.optional-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1.2fr;
+  gap: 12px;
+  margin-top: 14px;
+}
+.field label {
+  display: block;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  margin-bottom: 6px;
+}
+.field label .opt { color: var(--ink-faint); opacity: 0.6; text-transform: none; letter-spacing: 0; }
+.field input, .field select {
+  width: 100%;
+  background: var(--ground);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 14px;
+  padding: 10px 12px;
+}
+.field input:focus, .field select:focus {
+  outline: none; border-color: var(--teal-dim);
+}
+.field select { cursor: pointer; }
+
+.action-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 18px;
+}
+.btn {
+  font-family: var(--mono);
+  font-size: 13px;
+  letter-spacing: 0.06em;
+  border: 0;
+  border-radius: 9px;
+  padding: 12px 22px;
+  cursor: pointer;
+  transition: transform 0.1s, filter 0.15s;
+  display: inline-flex; align-items: center; gap: 9px;
+}
+.btn:active { transform: translateY(1px); }
+.btn-primary {
+  background: linear-gradient(150deg, var(--teal), var(--teal-dim));
+  color: #04201d;
+  font-weight: 600;
+  box-shadow: 0 10px 28px -12px rgba(54,214,195,0.7);
+}
+.btn-primary:hover { filter: brightness(1.06); }
+.btn-primary:disabled { opacity: 0.5; cursor: not-allowed; filter: none; }
+.btn-ghost {
+  background: transparent;
+  color: var(--ink-dim);
+  border: 1px solid var(--line);
+}
+.btn-ghost:hover { color: var(--ink); border-color: var(--ink-faint); }
+.btn svg { width: 15px; height: 15px; }
+
+/* ============================================================
+   CLARIFICATION LAYER
+   ============================================================ */
+.clarify {
+  margin-bottom: 22px;
+  border-color: var(--amber-dim);
+  background: linear-gradient(180deg, rgba(245,177,61,0.05), var(--panel-2));
+}
+.clarify-head {
+  display: flex; align-items: center; gap: 10px; margin-bottom: 4px;
+}
+.clarify-head .dot {
+  width: 8px; height: 8px; border-radius: 50%; background: var(--amber);
+  box-shadow: 0 0 10px 1px rgba(245,177,61,0.6);
+}
+.clarify-head h3 { font-size: 14px; margin: 0; font-weight: 600; }
+.clarify-sub {
+  color: var(--ink-dim); font-size: 13px; margin: 0 0 16px 18px;
+}
+.clarify-q { margin-bottom: 16px; }
+.clarify-q .q-text {
+  font-size: 14px; margin-bottom: 9px; color: var(--ink);
+}
+.chip-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip {
+  font-family: var(--mono); font-size: 12px;
+  background: var(--ground); border: 1px solid var(--line);
+  color: var(--ink-dim); border-radius: 999px;
+  padding: 7px 14px; cursor: pointer; transition: all 0.13s;
+}
+.chip:hover { border-color: var(--amber-dim); color: var(--ink); }
+.chip.selected {
+  background: rgba(245,177,61,0.12); border-color: var(--amber);
+  color: var(--amber);
+}
+.chip.dunno { font-style: italic; opacity: 0.85; }
+.clarify-text-input {
+  width: 100%; margin-top: 4px;
+  background: var(--ground); border: 1px solid var(--line);
+  border-radius: 8px; color: var(--ink);
+  font-family: var(--sans); font-size: 14px; padding: 9px 12px;
+}
+.clarify-text-input:focus { outline: none; border-color: var(--amber-dim); }
+
+/* ============================================================
+   LOADING / PIPELINE
+   ============================================================ */
+.pipeline { margin-bottom: 22px; }
+.pipe-steps { display: flex; flex-direction: column; gap: 2px; }
+.pipe-step {
+  display: flex; align-items: center; gap: 14px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  font-family: var(--mono); font-size: 13px;
+  color: var(--ink-faint);
+  transition: all 0.3s;
+}
+.pipe-step .pstat {
+  width: 18px; height: 18px; flex: 0 0 auto;
+  display: grid; place-items: center;
+}
+.pipe-step .spinner {
+  width: 14px; height: 14px;
+  border: 2px solid var(--line);
+  border-top-color: var(--teal);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.pipe-step .check {
+  color: var(--green); font-size: 14px;
+}
+.pipe-step.active { color: var(--ink); background: var(--panel-3); }
+.pipe-step.done { color: var(--ink-dim); }
+.pipe-step .pmeta { margin-left: auto; font-size: 11px; opacity: 0.7; }
+.pipe-bar {
+  height: 3px; background: var(--line); border-radius: 2px;
+  margin-top: 16px; overflow: hidden;
+}
+.pipe-bar > span {
+  display: block; height: 100%;
+  background: linear-gradient(90deg, var(--teal-dim), var(--teal));
+  width: 0%; transition: width 0.4s ease;
+}
+
+/* ============================================================
+   RESULTS
+   ============================================================ */
+.results { display: none; }
+.results.show { display: block; animation: fadein 0.4s ease; }
+@keyframes fadein { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+
+.result-top {
+  display: grid;
+  grid-template-columns: 280px 1fr;
+  gap: 22px;
+  margin-bottom: 22px;
+}
+
+/* confidence ring panel */
+.ring-panel {
+  display: flex; flex-direction: column; align-items: center;
+  justify-content: center; text-align: center;
+  padding: 26px 22px;
+}
+.ring-wrap { position: relative; width: 180px; height: 180px; }
+.ring-wrap svg { transform: rotate(-90deg); }
+.ring-center {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+}
+.ring-score {
+  font-family: var(--mono); font-size: 46px; font-weight: 600;
+  line-height: 1; letter-spacing: -0.02em;
+}
+.ring-label {
+  font-family: var(--mono); font-size: 10px; letter-spacing: 0.16em;
+  text-transform: uppercase; color: var(--ink-faint); margin-top: 6px;
+}
+.ring-caption {
+  margin-top: 18px; font-size: 12.5px; color: var(--ink-dim);
+  font-family: var(--mono);
+}
+
+/* status + guidance panel */
+.verdict-panel { display: flex; flex-direction: column; }
+.status-badge {
+  display: inline-flex; align-items: center; gap: 9px;
+  font-family: var(--mono); font-size: 13px; letter-spacing: 0.05em;
+  padding: 8px 15px; border-radius: 999px;
+  width: fit-content; margin-bottom: 16px;
+  text-transform: uppercase;
+}
+.status-badge .sdot { width: 9px; height: 9px; border-radius: 50%; }
+.action-guidance {
+  font-size: 17px; line-height: 1.45; font-weight: 550;
+  margin: 0 0 14px; letter-spacing: -0.01em;
+}
+.ai-reasoning {
+  font-size: 13.5px; color: var(--ink-dim); line-height: 1.6;
+  margin: 0 0 18px;
+  padding-left: 14px; border-left: 2px solid var(--line);
+}
+.drivers { display: flex; flex-direction: column; gap: 8px; margin-bottom: 4px; }
+.driver {
+  display: flex; align-items: center; gap: 10px;
+  font-size: 13px;
+}
+.driver .dicon {
+  width: 18px; height: 18px; border-radius: 5px; flex: 0 0 auto;
+  display: grid; place-items: center; font-family: var(--mono);
+  font-size: 12px; font-weight: 700;
+}
+.driver.positive .dicon { background: rgba(90,210,154,0.15); color: var(--green); }
+.driver.negative .dicon { background: rgba(240,115,138,0.15); color: var(--rose); }
+.driver.warning .dicon { background: rgba(245,177,61,0.15); color: var(--amber); }
+.driver .dlabel { color: var(--ink-dim); }
+
+/* ============================================================
+   EVIDENCE MAP
+   ============================================================ */
+.map-panel { margin-bottom: 22px; }
+.map-layout { display: grid; grid-template-columns: 1fr 320px; gap: 20px; }
+.map-stage { position: relative; }
+#evidenceMap {
+  width: 100%; height: auto; display: block;
+  background: var(--ground);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+.map-axis-label {
+  font-family: var(--mono); font-size: 10px; fill: var(--ink-faint);
+  letter-spacing: 0.08em;
+}
+.map-grid-line { stroke: var(--line-soft); stroke-width: 1; }
+.map-quad-label { font-family: var(--mono); font-size: 9.5px; fill: var(--ink-faint); opacity: 0.55; letter-spacing: 0.1em; }
+.map-dot { cursor: pointer; transition: stroke-width 0.13s, opacity 0.13s; }
+.map-dot:hover { stroke: var(--ink); stroke-width: 2; }
+.map-dot.sel { stroke: var(--ink); stroke-width: 2.5; }
+
+.map-legend {
+  display: flex; flex-wrap: wrap; gap: 8px 14px; margin-top: 14px;
+  font-family: var(--mono); font-size: 11px; color: var(--ink-faint);
+}
+.map-legend .lg { display: flex; align-items: center; gap: 6px; }
+.map-legend .lg .sw { width: 9px; height: 9px; border-radius: 50%; }
+
+/* source side card */
+.source-card {
+  background: var(--ground); border: 1px solid var(--line);
+  border-radius: var(--radius-sm); padding: 18px;
+  min-height: 360px; display: flex; flex-direction: column;
+}
+.source-card .empty {
+  margin: auto; text-align: center; color: var(--ink-faint);
+  font-family: var(--mono); font-size: 12px; line-height: 1.7;
+}
+.sc-type {
+  font-family: var(--mono); font-size: 10px; letter-spacing: 0.12em;
+  text-transform: uppercase; padding: 3px 9px; border-radius: 5px;
+  width: fit-content; margin-bottom: 10px;
+}
+.sc-title { font-size: 15px; font-weight: 600; line-height: 1.3; margin: 0 0 4px; }
+.sc-title-link { text-decoration: none; color: inherit; }
+.sc-title-link:hover .sc-title { text-decoration: underline; }
+.sc-ext { font-size: 12px; opacity: 0.7; }
+.sc-url { display: block; font-family: var(--mono); font-size: 11px; color: var(--teal); word-break: break-all; margin-bottom: 10px; text-decoration: none; }
+a.sc-url:hover { text-decoration: underline; }
+.sc-open-btn {
+  display: inline-block; font-family: var(--mono); font-size: 11px;
+  letter-spacing: 0.06em; text-transform: uppercase; text-decoration: none;
+  color: var(--teal); border: 1px solid var(--teal); border-radius: 6px;
+  padding: 5px 12px; margin-bottom: 14px; transition: background 0.15s, color 0.15s;
+}
+.sc-open-btn:hover { background: var(--teal); color: #04201d; }
+.sc-metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 14px; }
+.sc-metric {
+  background: var(--panel-3); border-radius: 7px; padding: 9px 11px;
+}
+.sc-metric .m-label { font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-faint); margin-bottom: 3px; }
+.sc-metric .m-val { font-family: var(--mono); font-size: 15px; font-weight: 600; }
+.sc-section { margin-bottom: 12px; }
+.sc-section .s-head { font-family: var(--mono); font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-faint); margin-bottom: 5px; }
+.sc-section .s-body { font-size: 13px; color: var(--ink-dim); line-height: 1.5; }
+.sc-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.sc-tag {
+  font-family: var(--mono); font-size: 10px; padding: 3px 8px;
+  border-radius: 5px; border: 1px solid var(--line);
+  color: var(--ink-dim);
+}
+.sc-tag.warn { border-color: var(--amber-dim); color: var(--amber); }
+.sc-tag.bad { border-color: var(--rose-dim); color: var(--rose); }
+.sc-tag.good { border-color: var(--teal-dim); color: var(--teal); }
+.sc-handling {
+  margin-top: auto; padding-top: 14px; border-top: 1px solid var(--line);
+  font-family: var(--mono); font-size: 11px; letter-spacing: 0.04em;
+  display: flex; align-items: center; gap: 8px;
+}
+.sc-handling .hlabel { color: var(--ink-faint); }
+.sc-handling .hval { color: var(--ink); }
+
+/* ============================================================
+   STRONGEST EVIDENCE
+   ============================================================ */
+.evidence-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; margin-bottom: 22px; }
+.ev-col-head {
+  display: flex; align-items: center; gap: 9px; margin-bottom: 14px;
+  font-family: var(--mono); font-size: 12px; letter-spacing: 0.05em;
+}
+.ev-col-head .ebar { width: 3px; height: 16px; border-radius: 2px; }
+.ev-col.support .ebar { background: var(--green); }
+.ev-col.reduce .ebar { background: var(--rose); }
+.ev-card {
+  background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: var(--radius-sm); padding: 15px; margin-bottom: 12px;
+}
+.ev-card .ev-meta {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 8px;
+  font-family: var(--mono); font-size: 10.5px;
+}
+.ev-card .ev-type {
+  text-transform: uppercase; letter-spacing: 0.08em; padding: 2px 7px;
+  border-radius: 4px;
+}
+.ev-card .ev-strength { margin-left: auto; color: var(--ink-faint); }
+.ev-card .ev-text { font-size: 13.5px; color: var(--ink); line-height: 1.5; margin-bottom: 8px; }
+.ev-card .ev-why { font-size: 12px; color: var(--ink-faint); line-height: 1.45; }
+.ev-empty { font-family: var(--mono); font-size: 12px; color: var(--ink-faint); padding: 14px; text-align: center; }
+
+/* ============================================================
+   SAFETY NOTE
+   ============================================================ */
+.safety {
+  display: flex; align-items: flex-start; gap: 14px;
+  border: 1px solid var(--rose-dim);
+  background: linear-gradient(180deg, rgba(240,115,138,0.06), var(--panel-2));
+  border-radius: var(--radius);
+  padding: 18px 20px; margin-bottom: 22px;
+}
+.safety .sicon {
+  flex: 0 0 auto; width: 34px; height: 34px; border-radius: 9px;
+  background: rgba(240,115,138,0.12); display: grid; place-items: center;
+}
+.safety .sicon svg { width: 18px; height: 18px; }
+.safety .stext h4 { margin: 0 0 4px; font-size: 13px; font-family: var(--mono); letter-spacing: 0.04em; color: var(--rose); }
+.safety .stext p { margin: 0; font-size: 13px; color: var(--ink-dim); line-height: 1.55; }
+
+/* ============================================================
+   JSON DEBUG
+   ============================================================ */
+.json-panel { margin-bottom: 22px; }
+.json-toggle {
+  display: flex; align-items: center; gap: 10px; cursor: pointer;
+  user-select: none;
+}
+.json-toggle .caret { transition: transform 0.2s; font-family: var(--mono); color: var(--ink-faint); }
+.json-toggle.open .caret { transform: rotate(90deg); }
+pre#jsonView {
+  display: none; margin: 16px 0 0;
+  background: var(--ground); border: 1px solid var(--line);
+  border-radius: var(--radius-sm); padding: 16px;
+  font-family: var(--mono); font-size: 12px; line-height: 1.55;
+  color: var(--ink-dim); overflow-x: auto; max-height: 460px; overflow-y: auto;
+}
+pre#jsonView.show { display: block; }
+.json-panel.open pre#jsonView { display: block; }
+.jk { color: var(--teal); }
+.js { color: var(--amber); }
+.jn { color: var(--violet); }
+.jb { color: var(--rose); }
+
+/* ---------- footer ---------- */
+.foot {
+  text-align: center; font-family: var(--mono); font-size: 11px;
+  color: var(--ink-faint); padding-top: 20px; border-top: 1px solid var(--line-soft);
+}
+
+/* ---------- responsive ---------- */
+@media (max-width: 900px) {
+  .result-top { grid-template-columns: 1fr; }
+  .map-layout { grid-template-columns: 1fr; }
+  .evidence-cols { grid-template-columns: 1fr; }
+  .optional-grid { grid-template-columns: 1fr; }
+  .hero { flex-direction: column; }
+  .hero-right { text-align: left; }
+}
+
+/* ---------- auto-detected context chips ---------- */
+.auto-detected {
+  margin-top: 12px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+  font-size: 12px; color: var(--ink-dim);
+}
+.auto-detected .ad-label { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-faint); }
+.auto-detected .ad-chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  background: color-mix(in srgb, var(--teal) 12%, transparent);
+  border: 1px solid var(--teal-dim); color: var(--teal);
+  border-radius: 999px; padding: 3px 10px; font-size: 12px;
+}
+
+/* accessibility: focus + reduced motion */
+:focus-visible { outline: 2px solid var(--teal); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}
+</style>
+</head>
+<body>
+<script>
+  // Apply saved/system theme before paint to avoid a flash of the wrong theme.
+  (function () {
+    try {
+      var saved = localStorage.getItem("veritas-theme");
+      var theme = saved || (window.matchMedia &&
+        window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
+      document.documentElement.setAttribute("data-theme", theme);
+    } catch (e) {
+      document.documentElement.setAttribute("data-theme", "dark");
+    }
+  })();
+</script>
+<div class="wrap">
+
+  <!-- ============ 1. HERO ============ -->
+  <header class="hero">
+    <div class="hero-left">
+      <div class="brandline">
+        <span class="mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none"><path d="M12 2l8 3v6c0 5-3.5 8.5-8 11-4.5-2.5-8-6-8-11V5l8-3z" stroke="#04201d" stroke-width="1.8" fill="rgba(4,32,29,0.25)"/><path d="M8.5 12l2.5 2.5 4.5-5" stroke="#04201d" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </span>
+        <span class="brandname"><b>Veritas</b> Crisis Mode</span>
+        <span class="mode-chip">● Crisis triage</span>
+      </div>
+      <h1>Emergency misinformation triage<br>for <span class="accent">disaster claims</span>.</h1>
+      <p class="lead">Veritas checks whether a crisis claim is verified enough to act on — before it misdirects rescue resources.</p>
+      <p class="sub">Paste a URL or a claim. Veritas gathers sources, weighs reliability with a fixed rule engine, and tells you how to handle it: monitor, request confirmation, or escalate to a human.</p>
+    </div>
+    <div class="hero-right">
+      <div><span class="pulse"></span>SYSTEM NOMINAL</div>
+      <div>RULE ENGINE v1.0</div>
+      <div>MOCK MODE — agents offline</div>
+      <button id="themeToggle" class="theme-toggle" type="button" aria-label="Toggle light/dark theme">
+        <span class="ti" id="themeIcon">🌙</span><span id="themeLabel">Dark</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- ============ 2. INPUT PANEL ============ -->
+  <section class="panel input-panel">
+    <div class="panel-pad">
+      <div class="panel-head">
+        <span class="idx">01</span>
+        <h2>Submit a crisis claim</h2>
+        <span class="hint">URL or text snippet</span>
+      </div>
+
+      <div class="tabs" role="tablist">
+        <button class="tab active" data-mode="text" role="tab">TEXT CLAIM</button>
+        <button class="tab" data-mode="url" role="tab">URL</button>
+      </div>
+
+      <div class="input-row">
+        <textarea id="mainInput" placeholder="Paste the rescue claim, shelter rumor, road-closure report, or donation request here…"></textarea>
+      </div>
+
+      <div class="optional-grid">
+        <div class="field">
+          <label for="locInput">Location <span class="opt">(optional)</span></label>
+          <input id="locInput" type="text" placeholder="e.g. Tacloban, Leyte" />
+        </div>
+        <div class="field">
+          <label for="timeInput">Incident time <span class="opt">(optional)</span></label>
+          <input id="timeInput" type="text" placeholder="e.g. 2h ago / Jun 19 14:00" />
+        </div>
+        <div class="field">
+          <label for="typeInput">Claim type <span class="opt">(optional)</span></label>
+          <select id="typeInput">
+            <option value="">— select —</option>
+            <optgroup label="Natural hazards">
+              <option value="earthquake">Earthquake</option>
+              <option value="wildfire">Wildfire</option>
+              <option value="flood_storm">Flood / Storm / Cyclone</option>
+              <option value="volcano">Volcano</option>
+              <option value="other_disaster">Other disaster</option>
+            </optgroup>
+            <optgroup label="Violence & security">
+              <option value="shooting">Shooting</option>
+              <option value="terrorism">Terrorism / Attack</option>
+              <option value="violent_crime">Homicide / Violent crime</option>
+              <option value="conflict">Conflict / War</option>
+              <option value="protest">Protest / Unrest</option>
+            </optgroup>
+            <optgroup label="Emergency response">
+              <option value="rescue_request">Rescue request</option>
+              <option value="shelter_status">Shelter status</option>
+              <option value="infrastructure">Infrastructure / Road</option>
+              <option value="donation_aid">Donation / Aid</option>
+            </optgroup>
+            <optgroup label="Other">
+              <option value="misinformation">Misinformation</option>
+              <option value="other">Other</option>
+            </optgroup>
+          </select>
+        </div>
+      </div>
+      <div id="autoDetected" class="auto-detected" style="display:none"></div>
+
+      <div class="action-row">
+        <button class="btn btn-primary" id="factCheckBtn">
+          <svg viewBox="0 0 24 24" fill="none"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/><path d="M16 16l5 5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+          Fact Check
+        </button>
+        <button class="btn btn-ghost" id="resetBtn">Reset</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 3. CLARIFICATION LAYER ============ -->
+  <section class="panel clarify" id="clarifyPanel" style="display:none">
+    <div class="panel-pad">
+      <div class="clarify-head">
+        <span class="dot"></span>
+        <h3>A few quick questions first</h3>
+      </div>
+      <p class="clarify-sub">This helps Veritas weigh sources correctly. Answer what you can — “I don’t know” is fine.</p>
+      <div id="clarifyQuestions"></div>
+      <div class="action-row">
+        <button class="btn btn-primary" id="clarifyContinueBtn">
+          Continue analysis
+          <svg viewBox="0 0 24 24" fill="none"><path d="M5 12h14M13 6l6 6-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+        <button class="btn btn-ghost" id="clarifySkipBtn">Skip — analyze anyway</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 4. PIPELINE / LOADING ============ -->
+  <section class="panel pipeline" id="pipelinePanel" style="display:none">
+    <div class="panel-pad">
+      <div class="panel-head">
+        <span class="idx">02</span>
+        <h2>Running triage pipeline</h2>
+        <span class="hint" id="pipeHint">live — streaming agent progress</span>
+      </div>
+      <div class="pipe-steps" id="pipeSteps"></div>
+      <div class="pipe-bar"><span id="pipeBarFill"></span></div>
+    </div>
+  </section>
+
+  <!-- ============ 5–8. RESULTS ============ -->
+  <div class="results" id="resultsRoot">
+
+    <!-- top: ring + verdict -->
+    <div class="result-top">
+      <section class="panel ring-panel">
+        <div class="ring-wrap">
+          <svg width="180" height="180" viewBox="0 0 180 180">
+            <circle cx="90" cy="90" r="76" fill="none" stroke="var(--line)" stroke-width="12"/>
+            <circle id="ringProgress" cx="90" cy="90" r="76" fill="none" stroke="var(--teal)" stroke-width="12" stroke-linecap="round" stroke-dasharray="477" stroke-dashoffset="477"/>
+          </svg>
+          <div class="ring-center">
+            <div class="ring-score" id="ringScore">0</div>
+            <div class="ring-label">Confidence</div>
+          </div>
+        </div>
+        <div class="ring-caption" id="ringCaption">Verification confidence</div>
+      </section>
+
+      <section class="panel verdict-panel">
+        <div class="panel-pad" style="display:flex;flex-direction:column;height:100%">
+          <div class="status-badge" id="statusBadge">
+            <span class="sdot"></span><span class="stext-label">—</span>
+          </div>
+          <p class="action-guidance" id="actionGuidance">—</p>
+          <p class="ai-reasoning" id="aiReasoning">—</p>
+          <div class="drivers" id="riskDrivers"></div>
+        </div>
+      </section>
+    </div>
+
+    <!-- evidence map -->
+    <section class="panel map-panel">
+      <div class="panel-pad">
+        <div class="panel-head">
+          <span class="idx">03</span>
+          <h2>Evidence map</h2>
+          <span class="hint">click a source to inspect</span>
+        </div>
+        <div class="map-layout">
+          <div class="map-stage">
+            <svg id="evidenceMap" viewBox="0 0 600 440" preserveAspectRatio="xMidYMid meet"></svg>
+            <div class="map-legend" id="mapLegend"></div>
+          </div>
+          <div class="source-card" id="sourceCard">
+            <div class="empty">No source selected.<br>Click any circle on the map<br>to inspect its evidence.</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- strongest evidence -->
+    <section class="panel" style="background:transparent;border:0;box-shadow:none;padding:0">
+      <div class="evidence-cols">
+        <div class="ev-col support panel panel-pad">
+          <div class="ev-col-head"><span class="ebar"></span>STRONGEST EVIDENCE · SUPPORTS CREDIBILITY</div>
+          <div id="evSupport"></div>
+        </div>
+        <div class="ev-col reduce panel panel-pad">
+          <div class="ev-col-head"><span class="ebar"></span>STRONGEST EVIDENCE · REDUCES CONFIDENCE</div>
+          <div id="evReduce"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- safety note -->
+    <section class="safety">
+      <div class="sicon">
+        <svg viewBox="0 0 24 24" fill="none"><path d="M12 3l9 16H3l9-16z" stroke="var(--rose)" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 10v4M12 17v.5" stroke="var(--rose)" stroke-width="1.8" stroke-linecap="round"/></svg>
+      </div>
+      <div class="stext">
+        <h4>NOT FOR EMERGENCY DISPATCH</h4>
+        <p>Veritas is a triage aid, not an authority. Do not use these scores to make real emergency dispatch, evacuation, or resource-allocation decisions. Always confirm through official emergency channels before acting on any crisis claim. Confidence scores reflect available open-source signals only and can be wrong.</p>
+      </div>
+    </section>
+
+    <!-- json debug -->
+    <section class="panel json-panel" id="jsonPanel">
+      <div class="panel-pad">
+        <div class="json-toggle" id="jsonToggle">
+          <span class="caret">▶</span>
+          <span class="idx" style="font-family:var(--mono);font-size:11px;color:var(--teal);border:1px solid var(--teal-dim);border-radius:6px;padding:1px 7px">JSON</span>
+          <h2 style="font-size:14px;margin:0;font-weight:600">Structured result (debug)</h2>
+          <span class="hint" style="margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--ink-faint)">VeritasCrisisResult</span>
+        </div>
+        <pre id="jsonView"></pre>
+      </div>
+    </section>
+
+  </div>
+
+  <div class="foot">VERITAS CRISIS MODE · HACKATHON BUILD · NOT A REAL EMERGENCY SERVICE</div>
+</div>
+
+<script>
+/* ============================================================
+   VERITAS CRISIS MODE — front-end logic
+   Single-file, no dependencies.
+
+   Architecture:
+   - reliabilityPolicy  : fixed source-type → reliability map
+   - ruleEngine         : derives reliability, confidence, status,
+                          and map coordinates. AI never sets these.
+   - render*            : pure view functions over the result object
+   ============================================================ */
+
+/* ---------- FIXED RELIABILITY POLICY (rule-based, never AI) ---------- */
+const reliabilityPolicy = {
+  emergency_official: 0.95,
+  government:         0.95,
+  verified_responder: 0.88,
+  verified_local:     0.78,
+  news:               0.72,
+  ngo:                0.68,
+  academic:           0.80,
+  social:             0.20,
+  anonymous:          0.14,
+  blog:               0.30
+};
+
+/* source-type display colors (map + cards) */
+const sourceColors = {
+  emergency_official: "#5ad29a",
+  government:         "#36d6c3",
+  verified_responder: "#7fd6c3",
+  verified_local:     "#9fd6a8",
+  news:               "#8b8cf0",
+  ngo:                "#b48bf0",
+  academic:           "#6fa8f0",
+  social:             "#f5b13d",
+  anonymous:          "#f0738a",
+  blog:               "#d68b6f"
+};
+
+const sourceTypeLabel = {
+  emergency_official: "Emergency official",
+  government: "Government",
+  verified_responder: "Verified responder",
+  verified_local: "Verified local",
+  news: "News",
+  ngo: "NGO",
+  academic: "Academic",
+  social: "Social",
+  anonymous: "Anonymous",
+  blog: "Blog"
+};
+
+const SAFE_STATUS = {
+  verified_signal:        { label: "Verified signal",        color: "var(--st-verified)" },
+  needs_confirmation:     { label: "Needs confirmation",     color: "var(--st-needs)" },
+  conflicting_reports:    { label: "Conflicting reports",    color: "var(--st-conflict)" },
+  low_evidence_confidence:{ label: "Low evidence confidence",color: "var(--st-low)" },
+  escalate_human_review:  { label: "Escalate human review",  color: "var(--st-escalate)" }
+};
+
+/* ============================================================
+   RULE ENGINE
+   Takes agent output (sources with type/stance/relevance + an AI
+   score) and deterministically computes reliability, confidence,
+   status, and map coordinates. The AI's role is limited to
+   classification (type, stance, relevance) and reasoning text.
+   ============================================================ */
+const ruleEngine = {
+  // reliability is looked up, never invented
+  applyReliability(sources) {
+    return sources.map(s => ({
+      ...s,
+      reliability: reliabilityPolicy[s.type] ?? 0.2
+    }));
+  },
+
+  // weighted confidence: sum of (reliability * relevance * stance)
+  // normalized against total weighting mass, then mapped to 0–100.
+  computeConfidence(sources) {
+    let signed = 0, mass = 0;
+    for (const s of sources) {
+      const w = s.reliability * s.relevance;
+      signed += w * s.stance;   // stance in [-1, +1]
+      mass   += w;
+    }
+    if (mass === 0) return 0;
+    const ratio = signed / mass;          // [-1, +1]
+    return Math.round(((ratio + 1) / 2) * 100); // → [0, 100]
+  },
+
+  // status is derived from confidence + agreement, using SAFE labels only.
+  // Key safety rule: a claim is only "verified" when RELIABLE sources
+  // back the claim directly. High-relevance support from low-trust
+  // sources (e.g. a single social post with the exact address) must NOT
+  // promote a claim to verified_signal — that is exactly the failure
+  // mode that misdirects rescue resources.
+  computeStatus(sources, confidence) {
+    const reliable = sources.filter(s => s.reliability >= 0.7);
+    const supportsRel = reliable.filter(s => s.stance > 0.15);
+    const contradictsRel = reliable.filter(s => s.stance < -0.15);
+    const hasConflict = supportsRel.length > 0 && contradictsRel.length > 0;
+    const reliableMass = reliable.reduce((a, s) => a + s.reliability * s.relevance, 0);
+
+    // is the SPECIFIC claim carried mainly by low-trust sources?
+    const topByRelevance = [...sources].sort((a, b) => b.relevance - a.relevance)[0];
+    const specificClaimIsLowTrust = topByRelevance && topByRelevance.reliability < 0.5 && topByRelevance.stance > 0.15;
+
+    if (hasConflict) return "conflicting_reports";
+    if (reliableMass < 0.6) return "low_evidence_confidence";
+    if (confidence <= 38) return "escalate_human_review";
+    // verified only when reliable sources directly support AND the
+    // specific claim isn't resting on a low-trust source alone.
+    if (confidence >= 72 && supportsRel.length >= 2 && !specificClaimIsLowTrust) return "verified_signal";
+    return "needs_confirmation";
+  },
+
+  // map coordinates: X = rumor-risk → credible signal, Y = reliability
+  toMapCoords(s, index = 0) {
+    // X: combine stance and reliability so credible+supporting sits right
+    const baseX = ((s.stance + 1) / 2) * 0.55 + s.reliability * 0.45;
+    const baseY = s.reliability;
+    // Sources often share the same inferred type/stance. A deterministic
+    // golden-angle spread keeps those circles individually visible.
+    const angle = index * 2.399963229728653;
+    const radius = index === 0 ? 0 : Math.min(0.14, 0.035 + Math.sqrt(index) * 0.022);
+    const x = Math.max(0.04, Math.min(0.96, baseX + Math.cos(angle) * radius));
+    const y = Math.max(0.04, Math.min(0.96, baseY + Math.sin(angle) * radius));
+    return { x, y };
+  },
+
+  // per-source recommended handling (safe vocabulary)
+  recommendHandling(s) {
+    if (s.reliability >= 0.85 && s.stance > 0.2) return "monitor";
+    if (s.reliability < 0.35) return "avoid_resource_redirect";
+    if (s.stance < -0.2) return "escalate_human_review";
+    return "request_confirmation";
+  }
+};
+
+/* ============================================================
+   APP STATE + WIRING
+   ============================================================ */
+const state = {
+  inputMode: "text",
+  selectedSourceIdx: null,
+  clarifyAnswers: {},
+  lastResult: null
+};
+
+const $ = sel => document.querySelector(sel);
+const $$ = sel => Array.from(document.querySelectorAll(sel));
+
+/* ---------- input tabs ---------- */
+$$(".tab").forEach(tab => {
+  tab.addEventListener("click", () => {
+    $$(".tab").forEach(t => t.classList.remove("active"));
+    tab.classList.add("active");
+    state.inputMode = tab.dataset.mode;
+    const input = $("#mainInput");
+    input.placeholder = state.inputMode === "url"
+      ? "https://… paste the link to the post, advisory, or article"
+      : "Paste the rescue claim, shelter rumor, road-closure report, or donation request here…";
+  });
+});
+
+/* ---------- FACT CHECK click ---------- */
+$("#factCheckBtn").addEventListener("click", onFactCheck);
+$("#resetBtn").addEventListener("click", resetAll);
+
+/* ---------- live auto-detect of location / time / type from the claim ---------- */
+if (!state.autoFilled) state.autoFilled = {};
+let _detectTimer = null;
+
+// extract while the user is typing (debounced) and when they leave the box
+$("#mainInput").addEventListener("input", () => {
+  clearTimeout(_detectTimer);
+  _detectTimer = setTimeout(() => {
+    const c = $("#mainInput").value.trim();
+    if (c.length >= 8) autoDetectContext(c);
+  }, 1000);
+});
+$("#mainInput").addEventListener("blur", () => {
+  const c = $("#mainInput").value.trim();
+  if (c.length >= 8) autoDetectContext(c);
+});
+
+// a manual edit "locks" a field so auto-detect won't overwrite it
+[["locInput", "location", "input"], ["timeInput", "time", "input"], ["typeInput", "claimType", "change"]]
+  .forEach(([id, key, ev]) => $("#" + id).addEventListener(ev, () => { state.autoFilled[key] = false; }));
+
+async function autoDetectContext(claim) {
+  if (!claim || claim === state.lastDetectedClaim) return;
+  state.lastDetectedClaim = claim;
+  const box = $("#autoDetected");
+  box.style.display = "flex";
+  box.innerHTML = `<span class="ad-label">🔎 Reading claim…</span>`;
+  let d = null;
+  try {
+    const res = await fetch("/api/extract-context", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ input: claim })
+    });
+    if (res.ok) d = await res.json();
+  } catch (e) { /* best-effort; manual clarify still covers gaps */ }
+  if (!d) { box.style.display = "none"; state.lastDetectedClaim = null; return; }
+  applyDetected(d);
+}
+
+// fill blank or previously auto-filled fields; never clobber manual edits
+function applyDetected(d) {
+  const loc = $("#locInput"), tm = $("#timeInput"), tp = $("#typeInput");
+  if (d.location && (!loc.value.trim() || state.autoFilled.location)) {
+    loc.value = d.location; state.autoFilled.location = true; state.clarifyAnswers.location = d.location;
+  } else if (!d.location && state.autoFilled.location) {
+    loc.value = ""; state.autoFilled.location = false; delete state.clarifyAnswers.location;
+  }
+  if (d.datetime && (!tm.value.trim() || state.autoFilled.time)) {
+    tm.value = d.datetime; state.autoFilled.time = true; state.clarifyAnswers.time = d.datetime;
+  } else if (!d.datetime && state.autoFilled.time) {
+    tm.value = ""; state.autoFilled.time = false; delete state.clarifyAnswers.time;
+  }
+  if (d.claim_type && d.claim_type !== "other" && (!tp.value || state.autoFilled.claimType)) {
+    tp.value = d.claim_type; state.autoFilled.claimType = true; state.clarifyAnswers.claimType = d.claim_type;
+  } else if ((!d.claim_type || d.claim_type === "other") && state.autoFilled.claimType) {
+    tp.value = ""; state.autoFilled.claimType = false; delete state.clarifyAnswers.claimType;
+  }
+  const filled = ["location", "time", "claimType"].some(k => state.autoFilled[k]);
+  const box = $("#autoDetected");
+  if (filled) {
+    box.style.display = "flex";
+    box.innerHTML = `<span class="ad-label">✓ Auto-filled from claim — edit if needed</span>`;
+  } else {
+    box.style.display = "none";
+  }
+}
+
+async function onFactCheck() {
+  const claim = $("#mainInput").value.trim();
+  if (!claim) {
+    $("#mainInput").focus();
+    $("#mainInput").style.borderColor = "var(--rose)";
+    setTimeout(() => $("#mainInput").style.borderColor = "", 1200);
+    return;
+  }
+  // make sure detection has run for the current text before deciding on clarify
+  if (claim !== state.lastDetectedClaim) {
+    const btn = $("#factCheckBtn");
+    const prev = btn.innerHTML;
+    btn.disabled = true; btn.innerHTML = "Reading claim…";
+    await autoDetectContext(claim);
+    btn.disabled = false; btn.innerHTML = prev;
+  }
+  // CLARIFICATION CHECK — only ask for what we still couldn't determine
+  const missing = computeMissingContext();
+  if (missing.length > 0) {
+    showClarification(missing);
+  } else {
+    runAnalysis();
+  }
+}
+
+/* ---------- clarification rule check ---------- */
+function computeMissingContext() {
+  // claim type is auto-detected from the claim (defaults to "other"), so it is
+  // no longer asked in clarification — only location and time are prompted.
+  const missing = [];
+  if (!$("#locInput").value.trim() && !state.clarifyAnswers.location) missing.push("location");
+  if (!$("#timeInput").value.trim() && !state.clarifyAnswers.time) missing.push("time");
+  return missing;
+}
+
+const CLARIFY_DEFS = {
+  location: {
+    q: "Where is this happening? A specific place helps weigh local sources.",
+    type: "text", placeholder: "e.g. Tacloban, Leyte — or leave blank"
+  },
+  time: {
+    q: "When did this happen or get posted?",
+    type: "chips", options: ["Within the last hour", "A few hours ago", "Today", "Older / unsure", "I don't know"]
+  },
+  claimType: {
+    q: "What kind of crisis information is this?",
+    type: "chips", options: ["Rescue request", "Shelter status", "Road closure", "Donation request", "Official alert", "Other"]
+  }
+};
+const CLAIMTYPE_MAP = {
+  "Rescue request": "rescue_request", "Shelter status": "shelter_status",
+  "Road closure": "road_closure", "Donation request": "donation_request",
+  "Official alert": "official_alert", "Other": "other"
+};
+
+function showClarification(missing) {
+  const container = $("#clarifyQuestions");
+  container.innerHTML = "";
+  missing.slice(0, 3).forEach(key => {
+    const def = CLARIFY_DEFS[key];
+    const wrap = document.createElement("div");
+    wrap.className = "clarify-q";
+    const q = document.createElement("div");
+    q.className = "q-text";
+    q.textContent = def.q;
+    wrap.appendChild(q);
+
+    if (def.type === "text") {
+      const inp = document.createElement("input");
+      inp.className = "clarify-text-input";
+      inp.placeholder = def.placeholder;
+      inp.dataset.key = key;
+      inp.addEventListener("input", () => {
+        state.clarifyAnswers[key === "location" ? "location" : key] = inp.value.trim();
+        updateClarifyButtons();
+      });
+      wrap.appendChild(inp);
+    } else {
+      const row = document.createElement("div");
+      row.className = "chip-row";
+      def.options.forEach(opt => {
+        const chip = document.createElement("button");
+        chip.className = "chip" + (opt.startsWith("I don't") ? " dunno" : "");
+        chip.textContent = opt;
+        chip.addEventListener("click", () => {
+          row.querySelectorAll(".chip").forEach(c => c.classList.remove("selected"));
+          chip.classList.add("selected");
+          if (key === "claimType") state.clarifyAnswers.claimType = CLAIMTYPE_MAP[opt] || "other";
+          else if (key === "time") state.clarifyAnswers.time = opt;
+          updateClarifyButtons();
+        });
+        row.appendChild(chip);
+      });
+      wrap.appendChild(row);
+    }
+    container.appendChild(wrap);
+  });
+  $("#clarifyPanel").style.display = "block";
+  $("#clarifyPanel").scrollIntoView({ behavior: "smooth", block: "center" });
+  updateClarifyButtons();
+}
+
+// "Continue" requires at least one answer; "Skip" is the explicit opt-out.
+function updateClarifyButtons() {
+  const hasText = $$(".clarify-text-input").some(i => i.value.trim());
+  const hasChip = $$("#clarifyQuestions .chip.selected").length > 0;
+  const answered = hasText || hasChip;
+  const cont = $("#clarifyContinueBtn");
+  cont.disabled = !answered;
+  cont.title = answered ? "" : "Answer at least one question, or use Skip";
+  $("#clarifySkipBtn").textContent = answered ? "Skip the rest" : "Skip — analyze anyway";
+}
+
+$("#clarifyContinueBtn").addEventListener("click", () => {
+  // pull any text answers into context fields
+  $$(".clarify-text-input").forEach(inp => {
+    if (inp.value.trim() && inp.dataset.key === "location") $("#locInput").value = inp.value.trim();
+  });
+  if (state.clarifyAnswers.claimType && !$("#typeInput").value) $("#typeInput").value = state.clarifyAnswers.claimType;
+  $("#clarifyPanel").style.display = "none";
+  runAnalysis();
+});
+$("#clarifySkipBtn").addEventListener("click", () => {
+  $("#clarifyPanel").style.display = "none";
+  runAnalysis();
+});
+
+/* ============================================================
+   PIPELINE ANIMATION → RUN ANALYSIS
+   ============================================================ */
+const PIPE_STEPS = [
+  { name: "Search Agent",  detail: "gathering candidate sources" },
+  { name: "Extract Agent", detail: "pulling evidence + location/time" },
+  { name: "Judge Agent",   detail: "scoring stance + relevance" },
+  { name: "Rule Engine",   detail: "computing reliability + confidence" },
+  { name: "Evidence Map",  detail: "plotting coordinates" }
+];
+
+function runAnalysis() {
+  // hide any prior results
+  $("#resultsRoot").classList.remove("show");
+  state.selectedSourceIdx = null;
+  $("#pipeHint").textContent = "live — streaming agent progress";
+  $("#pipeHint").style.color = "";
+
+  // build pipeline UI
+  const stepsEl = $("#pipeSteps");
+  stepsEl.innerHTML = "";
+  PIPE_STEPS.forEach((s, i) => {
+    const row = document.createElement("div");
+    row.className = "pipe-step";
+    row.id = "pstep-" + i;
+    row.innerHTML = `<span class="pstat"></span><span class="pname">${s.name}</span><span class="pmeta">${s.detail}</span>`;
+    stepsEl.appendChild(row);
+  });
+  $("#pipelinePanel").style.display = "block";
+  $("#pipeBarFill").style.width = "0%";
+  $("#pipelinePanel").scrollIntoView({ behavior: "smooth", block: "center" });
+
+  // assemble context for the (mock) agent call
+  const context = {
+    inputType: state.inputMode,
+    url: state.inputMode === "url" ? $("#mainInput").value.trim() : undefined,
+    location: $("#locInput").value.trim() || state.clarifyAnswers.location || undefined,
+    incidentTime: $("#timeInput").value.trim() || state.clarifyAnswers.time || undefined,
+    claimType: $("#typeInput").value || state.clarifyAnswers.claimType || undefined
+  };
+  const claim = $("#mainInput").value.trim();
+
+  // ---- drive the pipeline from REAL backend progress (SSE) ----
+  function setStep(idx, status, meta) {
+    const el = $("#pstep-" + idx);
+    if (!el) return;
+    el.classList.remove("active", "done");
+    if (status === "active") {
+      el.classList.add("active");
+      el.querySelector(".pstat").innerHTML = `<span class="spinner"></span>`;
+    } else if (status === "done") {
+      el.classList.add("done");
+      el.querySelector(".pstat").innerHTML = `<span class="check">✓</span>`;
+    }
+    if (meta) el.querySelector(".pmeta").textContent = meta;
+    const done = $("#pipeSteps").querySelectorAll(".pipe-step.done").length;
+    $("#pipeBarFill").style.width = (done / PIPE_STEPS.length * 100) + "%";
+  }
+
+  function finishWithResult(raw) {
+    // stages 3 (Rule Engine) and 4 (Evidence Map) run client-side
+    setStep(3, "active", "computing reliability + confidence");
+    const result = adaptAgentResult(raw, claim, context);
+    setStep(3, "done");
+    setStep(4, "active", "plotting coordinates");
+    state.lastResult = result;
+    setTimeout(() => {
+      setStep(4, "done");
+      $("#pipelinePanel").style.display = "none";
+      renderResults(result);
+    }, 260);
+  }
+
+  function showBackendError(err) {
+    console.error("Backend analysis failed", err);
+    $("#pipeHint").textContent = "analysis unavailable — check that all agents are running";
+    $("#pipeHint").style.color = "var(--rose)";
+    $("#pipeBarFill").style.width = "0%";
+    $("#resultsRoot").classList.remove("show");
+  }
+
+  (async () => {
+    setStep(0, "active", "contacting search agent…");
+    // watchdog: never let the pipeline hang forever if the backend stalls
+    const ctrl = new AbortController();
+    const watchdog = setTimeout(() => ctrl.abort(), 60000);
+    let res;
+    try {
+      res = await fetch('/api/check/stream', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: ctrl.signal,
+        body: JSON.stringify({
+          inputType: context.inputType,
+          input: claim,
+          context: {
+            location: context.location,
+            incidentTime: context.incidentTime,
+            claimType: context.claimType
+          }
+        })
+      });
+      if (!res.ok || !res.body) throw new Error('stream_unavailable ' + (res && res.status));
+    } catch (err) { clearTimeout(watchdog); return showBackendError(err); }
+
+    function handleEvent(evt) {
+      if (evt.stage === "search") {
+        if (evt.status === "active") setStep(0, "active", "gathering candidate sources…");
+        else if (evt.status === "done") { setStep(0, "done", (evt.count || 0) + " sources found"); setStep(1, "active", "pulling evidence…"); }
+      } else if (evt.stage === "extract") {
+        if (evt.status === "active") setStep(1, "active", "pulling evidence…");
+        else if (evt.status === "done") { setStep(1, "done", (evt.count || 0) + " sources gathered"); setStep(2, "active", "scoring with judge…"); }
+      } else if (evt.stage === "judge") {
+        if (evt.status === "active") setStep(2, "active", "scoring stance + relevance…");
+        else if (evt.status === "done") setStep(2, "done", "verdict ready");
+      }
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "", finalRaw = null, gotError = false;
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let nl;
+        while ((nl = buffer.indexOf("\n\n")) >= 0) {
+          const chunk = buffer.slice(0, nl); buffer = buffer.slice(nl + 2);
+          const dataLine = chunk.split("\n").find(l => l.startsWith("data:"));
+          if (!dataLine) continue;
+          let evt; try { evt = JSON.parse(dataLine.slice(5).trim()); } catch (e) { continue; }
+          handleEvent(evt);
+          if (evt.stage === "result") finalRaw = evt.verdict;
+          if (evt.stage === "error") gotError = true;
+        }
+      }
+    } catch (err) { clearTimeout(watchdog); return showBackendError(err); }
+
+    clearTimeout(watchdog);
+    if (finalRaw) finishWithResult(finalRaw);
+    else showBackendError(new Error(gotError ? "backend error" : "no result"));
+  })();
+}
+
+/* ============================================================
+   RENDER RESULTS
+   ============================================================ */
+function renderResults(r) {
+  renderRing(r.verificationConfidence, r.status);
+  renderVerdict(r);
+  renderMap(r);
+  renderStrongest(r);
+  renderJson(r);
+
+  $("#resultsRoot").classList.add("show");
+  $("#resultsRoot").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+/* ---- confidence ring ---- */
+function renderRing(score, status) {
+  const color = SAFE_STATUS[status].color;
+  const ring = $("#ringProgress");
+  const C = 477; // 2πr, r=76
+  ring.style.stroke = color;
+  // animate
+  let cur = 0;
+  const scoreEl = $("#ringScore");
+  const target = score;
+  const step = () => {
+    cur += Math.ceil((target - cur) / 6) || 1;
+    if (cur >= target) cur = target;
+    scoreEl.textContent = cur;
+    ring.style.strokeDashoffset = C - (C * cur / 100);
+    if (cur < target) requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+  $("#ringScore").style.color = color;
+  $("#ringCaption").textContent = "Verification confidence · 0–100";
+}
+
+/* ---- verdict / status / drivers ---- */
+function renderVerdict(r) {
+  const st = SAFE_STATUS[r.status];
+  const badge = $("#statusBadge");
+  badge.style.color = st.color;
+  badge.style.borderColor = st.color;
+  badge.style.border = "1px solid " + st.color;
+  badge.style.background = "color-mix(in srgb, " + st.color + " 12%, transparent)";
+  badge.querySelector(".sdot").style.background = st.color;
+  badge.querySelector(".stext-label").textContent = st.label;
+
+  $("#actionGuidance").textContent = r.actionGuidance;
+  $("#aiReasoning").textContent = r.aiVerdict.reasoning;
+
+  const drv = $("#riskDrivers");
+  drv.innerHTML = "";
+  r.riskDrivers.forEach(d => {
+    const el = document.createElement("div");
+    el.className = "driver " + d.kind;
+    const sym = d.kind === "positive" ? "+" : d.kind === "negative" ? "−" : "!";
+    el.innerHTML = `<span class="dicon">${sym}</span><span class="dlabel">${escapeHtml(d.label)}</span>`;
+    drv.appendChild(el);
+  });
+}
+
+/* ============================================================
+   EVIDENCE MAP (SVG)
+   X = rumor risk → credible signal, Y = source reliability
+   circle area = relevance, outline = reliability, color = source type
+   ============================================================ */
+function renderMap(r) {
+  const svg = $("#evidenceMap");
+  const W = 600, H = 440;
+  const padL = 54, padR = 24, padT = 24, padB = 52;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+  svg.innerHTML = "";
+
+  const NS = "http://www.w3.org/2000/svg";
+  const make = (tag, attrs) => {
+    const el = document.createElementNS(NS, tag);
+    for (const k in attrs) el.setAttribute(k, attrs[k]);
+    return el;
+  };
+
+  // grid lines (quartiles)
+  for (let i = 0; i <= 4; i++) {
+    const gx = padL + (plotW * i / 4);
+    const gy = padT + (plotH * i / 4);
+    svg.appendChild(make("line", { class:"map-grid-line", x1:gx, y1:padT, x2:gx, y2:padT+plotH }));
+    svg.appendChild(make("line", { class:"map-grid-line", x1:padL, y1:gy, x2:padL+plotW, y2:gy }));
+  }
+
+  // axes frame (slightly brighter)
+  svg.appendChild(make("line", { stroke:"var(--line)", "stroke-width":1.5, x1:padL, y1:padT+plotH, x2:padL+plotW, y2:padT+plotH }));
+  svg.appendChild(make("line", { stroke:"var(--line)", "stroke-width":1.5, x1:padL, y1:padT, x2:padL, y2:padT+plotH }));
+
+  // axis labels
+  const xlabL = make("text", { class:"map-axis-label", x:padL, y:H-30, "text-anchor":"start" }); xlabL.textContent = "◄ RUMOR RISK / LOW CONFIRMATION";
+  const xlabR = make("text", { class:"map-axis-label", x:padL+plotW, y:H-30, "text-anchor":"end" }); xlabR.textContent = "CREDIBLE EMERGENCY SIGNAL ►";
+  svg.appendChild(xlabL); svg.appendChild(xlabR);
+  // y label (rotated)
+  const ylab = make("text", { class:"map-axis-label", x:0, y:0, "text-anchor":"middle", transform:`translate(16,${padT+plotH/2}) rotate(-90)` });
+  ylab.textContent = "SOURCE RELIABILITY ►";
+  svg.appendChild(ylab);
+
+  // quadrant hints — placed at inner corners, low opacity, drawn
+  // BEFORE dots so circles always sit on top of the labels
+  const q1 = make("text", { class:"map-quad-label", x:padL+plotW-6, y:padT+26, "text-anchor":"end" }); q1.textContent = "ACT-WORTHY";
+  const q2 = make("text", { class:"map-quad-label", x:padL+8, y:padT+26, "text-anchor":"start" }); q2.textContent = "RELIABLE BUT DISPUTING";
+  const q3 = make("text", { class:"map-quad-label", x:padL+8, y:padT+plotH-10, "text-anchor":"start" }); q3.textContent = "LOW-TRUST NOISE";
+  const q4 = make("text", { class:"map-quad-label", x:padL+plotW-6, y:padT+plotH-10, "text-anchor":"end" }); q4.textContent = "UNVERIFIED CLAIM";
+  [q1,q2,q3,q4].forEach(q => svg.appendChild(q));
+
+  // plot points
+  r._mapData.forEach((pt, idx) => {
+    const cx = padL + pt.x * plotW;
+    const cy = padT + (1 - pt.y) * plotH; // invert Y (higher reliability = up)
+    // Area must be directly proportional to relevance:
+    // area = πr² and r = k√relevance, so relevance 0.60 has exactly
+    // six times the area of relevance 0.10.
+    const relevance = Math.max(0.01, Math.min(1, pt.s.relevance));
+    const radius = 30 * Math.sqrt(relevance);
+    const outlineWidth = 1 + pt.s.reliability * 3;
+    const fillOpacity = 0.42 + pt.s.reliability * 0.48;
+    const color = sourceColors[pt.s.type] || "#888";
+    const c = make("circle", {
+      class:"map-dot", cx, cy, r:radius,
+      fill: color, "fill-opacity":fillOpacity,
+      stroke: color, "stroke-width":outlineWidth,
+      "data-idx": idx
+    });
+    c.addEventListener("click", () => selectSource(idx, r));
+    svg.appendChild(c);
+    // tiny index label
+    const t = make("text", { x:cx, y:cy+4, "text-anchor":"middle", "font-family":"var(--mono)", "font-size":"10", fill:"#04201d", "font-weight":"700", "pointer-events":"none" });
+    t.textContent = idx + 1;
+    svg.appendChild(t);
+  });
+
+  // legend (only source types present)
+  const present = [...new Set(r.sources.map(s => s.type))];
+  const legend = $("#mapLegend");
+  legend.innerHTML = "";
+  const scaleHint = document.createElement("span");
+  scaleHint.className = "lg";
+  scaleHint.textContent = "Circle area = relevance · outline = reliability";
+  legend.appendChild(scaleHint);
+  present.forEach(type => {
+    const lg = document.createElement("span");
+    lg.className = "lg";
+    lg.innerHTML = `<span class="sw" style="background:${sourceColors[type]}"></span>${sourceTypeLabel[type]}`;
+    legend.appendChild(lg);
+  });
+
+  // reset side card
+  $("#sourceCard").innerHTML = `<div class="empty">No source selected.<br>Click any circle on the map<br>to inspect its evidence.</div>`;
+}
+
+function selectSource(idx, r) {
+  state.selectedSourceIdx = idx;
+  $$(".map-dot").forEach(d => d.classList.remove("sel"));
+  const dot = document.querySelector(`.map-dot[data-idx="${idx}"]`);
+  if (dot) dot.classList.add("sel");
+
+  const s = r.sources[idx];
+  const color = sourceColors[s.type];
+  const stanceLabel = s.stance > 0.15 ? "Supports signal" : s.stance < -0.15 ? "Disputes / rumor-risk" : "Neutral";
+  const locTag = tagFor("loc", s.locationStatus);
+  const timeTag = tagFor("time", s.timestampStatus);
+
+  const hasUrl = s.url && /^https?:\/\//.test(s.url);
+  const titleHtml = hasUrl
+    ? `<a class="sc-title-link" href="${escapeHtml(s.url)}" target="_blank" rel="noopener noreferrer"><h3 class="sc-title">${escapeHtml(s.title)} <span class="sc-ext">↗</span></h3></a>`
+    : `<h3 class="sc-title">${escapeHtml(s.title)}</h3>`;
+  const urlHtml = hasUrl
+    ? `<a class="sc-url" href="${escapeHtml(s.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(s.url)}</a>`
+    : `<div class="sc-url">${escapeHtml(s.url || "No URL")}</div>`;
+
+  $("#sourceCard").innerHTML = `
+    <span class="sc-type" style="background:${color}22;color:${color};border:1px solid ${color}55">${sourceTypeLabel[s.type]}</span>
+    ${titleHtml}
+    ${urlHtml}
+    ${hasUrl ? `<a class="sc-open-btn" href="${escapeHtml(s.url)}" target="_blank" rel="noopener noreferrer">Open source ↗</a>` : ""}
+    <div class="sc-metrics">
+      <div class="sc-metric"><div class="m-label">Reliability</div><div class="m-val" style="color:${color}">${(s.reliability*100).toFixed(0)}</div></div>
+      <div class="sc-metric"><div class="m-label">Relevance</div><div class="m-val">${(s.relevance*100).toFixed(0)}</div></div>
+      <div class="sc-metric"><div class="m-label">Stance</div><div class="m-val" style="color:${s.stance>=0?'var(--green)':'var(--rose)'}">${s.stance>=0?'+':''}${s.stance.toFixed(2)}</div></div>
+      <div class="sc-metric"><div class="m-label">Direction</div><div class="m-val" style="font-size:12px;padding-top:2px">${stanceLabel}</div></div>
+    </div>
+    <div class="sc-section"><div class="s-head">Extracted evidence</div><div class="s-body">${escapeHtml(s.extractedEvidence)}</div></div>
+    <div class="sc-section"><div class="s-head">Why it matters</div><div class="s-body">${escapeHtml(s.whyItMatters)}</div></div>
+    <div class="sc-section"><div class="s-head">Signals</div><div class="sc-tags">${locTag}${timeTag}</div></div>
+    <div class="sc-handling"><span class="hlabel">HANDLING →</span><span class="hval">${handlingLabel(s.recommendedHandling)}</span></div>
+  `;
+}
+
+function tagFor(kind, status) {
+  const cls = { available:"good", recent:"good", vague:"warn", old:"warn", missing:"bad", conflicting:"bad" }[status] || "";
+  const txt = (kind === "loc" ? "Location: " : "Time: ") + status;
+  return `<span class="sc-tag ${cls}">${txt}</span>`;
+}
+function handlingLabel(h) {
+  return {
+    monitor: "Monitor",
+    request_confirmation: "Request confirmation",
+    escalate_human_review: "Escalate human review",
+    avoid_resource_redirect: "Avoid resource redirect"
+  }[h] || h;
+}
+
+/* ============================================================
+   STRONGEST EVIDENCE CARDS
+   ============================================================ */
+function renderStrongest(r) {
+  // build ranked source objects for richer cards
+  const ranked = [...r.sources].map(s => ({
+    s, strength: s.reliability * s.relevance * Math.abs(s.stance)
+  })).sort((a,b) => b.strength - a.strength);
+
+  const support = ranked.filter(x => x.s.stance > 0.1).slice(0, 3);
+  const reduce  = ranked.filter(x => x.s.stance < -0.1 || x.s.reliability < 0.35).slice(0, 3);
+
+  renderEvCards($("#evSupport"), support, "support");
+  renderEvCards($("#evReduce"), reduce, "reduce");
+}
+function renderEvCards(container, items, kind) {
+  container.innerHTML = "";
+  if (items.length === 0) {
+    container.innerHTML = `<div class="ev-empty">No ${kind === "support" ? "supporting" : "confidence-reducing"} evidence of note.</div>`;
+    return;
+  }
+  items.forEach(({ s, strength }) => {
+    const color = sourceColors[s.type];
+    const card = document.createElement("div");
+    card.className = "ev-card";
+    card.innerHTML = `
+      <div class="ev-meta">
+        <span class="ev-type" style="background:${color}22;color:${color}">${sourceTypeLabel[s.type]}</span>
+        <span class="ev-strength">strength ${(strength).toFixed(2)} · rel ${(s.reliability*100).toFixed(0)}</span>
+      </div>
+      <div class="ev-text">${escapeHtml(s.extractedEvidence)}</div>
+      <div class="ev-why">${escapeHtml(s.whyItMatters)}</div>
+    `;
+    container.appendChild(card);
+  });
+}
+
+/* ============================================================
+   JSON DEBUG VIEW
+   ============================================================ */
+function renderJson(r) {
+  // strip internal _mapData before showing the contract shape
+  const clean = JSON.parse(JSON.stringify(r));
+  delete clean._mapData;
+  $("#jsonView").innerHTML = syntaxHighlight(JSON.stringify(clean, null, 2));
+}
+$("#jsonToggle").addEventListener("click", () => {
+  $("#jsonToggle").classList.toggle("open");
+  $("#jsonView").classList.toggle("show");
+});
+
+/* ---------- theme toggle ---------- */
+function applyThemeLabel(theme) {
+  const icon = $("#themeIcon"), label = $("#themeLabel");
+  if (!icon || !label) return;
+  if (theme === "light") { icon.textContent = "☀️"; label.textContent = "Light"; }
+  else { icon.textContent = "🌙"; label.textContent = "Dark"; }
+}
+applyThemeLabel(document.documentElement.getAttribute("data-theme") || "dark");
+$("#themeToggle").addEventListener("click", () => {
+  const cur = document.documentElement.getAttribute("data-theme") === "light" ? "light" : "dark";
+  const next = cur === "light" ? "dark" : "light";
+  document.documentElement.setAttribute("data-theme", next);
+  try { localStorage.setItem("veritas-theme", next); } catch (e) {}
+  applyThemeLabel(next);
+});
+
+function syntaxHighlight(json) {
+  return json
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g,
+      m => {
+        let cls = "jn";
+        if (/^"/.test(m)) cls = /:$/.test(m) ? "jk" : "js";
+        else if (/true|false/.test(m)) cls = "jb";
+        else if (/null/.test(m)) cls = "jb";
+        return `<span class="${cls}">${m}</span>`;
+      });
+}
+
+/* ============================================================
+   RESET + HELPERS
+   ============================================================ */
+function resetAll() {
+  $("#mainInput").value = "";
+  $("#locInput").value = "";
+  $("#timeInput").value = "";
+  $("#typeInput").value = "";
+  state.clarifyAnswers = {};
+  state.selectedSourceIdx = null;
+  state.autoFilled = {};
+  state.lastDetectedClaim = null;
+  $("#autoDetected").style.display = "none";
+  $("#clarifyPanel").style.display = "none";
+  $("#pipelinePanel").style.display = "none";
+  $("#resultsRoot").classList.remove("show");
+  $("#mainInput").focus();
+}
+
+function escapeHtml(str) {
+  return String(str).replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+}
+
+/* ============================================================
+   PHASE 4 — REAL BACKEND (live)
+   callApi() hits the local Flask backend (app.py :/api/check),
+   which proxies to the Judge agent (:5003) → Claude.
+   adaptAgentResult() maps the judge verdict onto the UI contract
+   that renderResults() expects. On any failure runAnalysis()
+   reports a backend error when the live agents are unavailable.
+
+   NOTE: never put API keys in this file. /api/check runs
+   server-side and holds the model credentials.
+   ============================================================ */
+async function callApi(claim, context) {
+  const res = await fetch('/api/check', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      inputType: context.inputType,
+      input: claim,
+      context: {
+        location: context.location,
+        incidentTime: context.incidentTime,
+        claimType: context.claimType
+      }
+    })
+  });
+  if (!res.ok) throw new Error('api_error ' + res.status);
+  return await res.json();
+}
+
+// Judge verdict → UI safe-status vocabulary
+const BACKEND_STATUS_MAP = {
+  Verified:  "verified_signal",
+  False:     "low_evidence_confidence",
+  Disputed:  "conflicting_reports",
+  Uncertain: "needs_confirmation"
+};
+
+function guessSourceType(url) {
+  const u = (url || "").toLowerCase();
+  if (/scholar\.google|\.edu|arxiv|ncbi|nih\.gov/.test(u)) return "academic";
+  if (/wikipedia\.org/.test(u)) return "academic";
+  if (/\.gov|nasa\.gov|cdc\./.test(u)) return "government";
+  if (/twitter\.com|x\.com|facebook\.com|t\.me|instagram/.test(u)) return "social";
+  if (/blogspot|wordpress|medium\.com/.test(u)) return "blog";
+  if (/news|bbc|cnn|reuters|nytimes|guardian/.test(u)) return "news";
+  if (/\.org/.test(u)) return "ngo";
+  return "news";
+}
+
+function normalizeBackendSourceType(sourceType, url) {
+  const t = (sourceType || "").toLowerCase();
+  if (t === "government") return "government";
+  if (["education", "research", "encyclopedia"].includes(t)) return "academic";
+  if (["news", "news_reputable", "fact_check"].includes(t)) return "news";
+  if (t === "social") return "social";
+  if (t === "ngo") return "ngo";
+  if (t === "blog") return "blog";
+  return guessSourceType(url);
+}
+
+function sourceRelevance(source, claim) {
+  const stop = new Set(["the","and","for","from","with","that","this","was","were","are","has","have","into","some"]);
+  const tokens = [...new Set((claim.toLowerCase().match(/[a-z0-9]+/g) || [])
+    .filter(w => w.length >= 3 && !stop.has(w)))];
+  const haystack = [
+    source.title || "", source.excerpt || "", source.snippet || ""
+  ].join(" ").toLowerCase();
+  const matched = tokens.filter(w => haystack.includes(w)).length;
+  if (matched === 0) return 0.05;
+  return Math.max(0.15, Math.min(1, matched / Math.max(1, Math.min(tokens.length, 8))));
+}
+
+function sourceStance(source, claim, verdictStatus) {
+  if (source.stance !== null && source.stance !== undefined &&
+      source.stance !== "" && Number.isFinite(Number(source.stance))) {
+    return Math.max(-1, Math.min(1, Number(source.stance)));
+  }
+
+  const claimText = (claim || "").toLowerCase();
+  const sourceText = [
+    source.title || "", source.excerpt || "", source.snippet || ""
+  ].join(" ").toLowerCase();
+  const relevance = sourceRelevance(source, claim);
+
+  // A negative phrase only disputes the claim when that same proposition is
+  // not already part of the claim (e.g. "no damage" supports a "no damage" claim).
+  const contradictionPhrases = [
+    "false", "fake", "hoax", "debunked", "misleading", "incorrect",
+    "did not", "does not", "has not", "have not", "no evidence",
+    "no association", "no link", "denied", "remains open", "still passable",
+    "not collapsed", "not confirmed"
+  ];
+  const contradicts = contradictionPhrases.some(
+    phrase => sourceText.includes(phrase) && !claimText.includes(phrase)
+  );
+
+  // Conflicting concrete numbers are a useful disagreement signal for
+  // magnitudes, temperatures, casualties, dates, etc.
+  const claimNumbers = new Set(claimText.match(/\b\d+(?:\.\d+)?\b/g) || []);
+  const sourceNumbers = new Set(sourceText.match(/\b\d+(?:\.\d+)?\b/g) || []);
+  const hasSharedNumber = [...claimNumbers].some(n => sourceNumbers.has(n));
+  const numberConflict = claimNumbers.size > 0 && sourceNumbers.size > 0 && !hasSharedNumber;
+
+  let stance;
+  if (contradicts) {
+    stance = -(0.35 + relevance * 0.55);
+  } else if (verdictStatus === "False") {
+    stance = -(0.25 + relevance * 0.60);
+  } else if (verdictStatus === "Disputed") {
+    stance = 0.10 + relevance * 0.55;
+  } else if (verdictStatus === "Verified") {
+    stance = 0.12 + relevance * 0.76;
+  } else {
+    stance = 0.05 + relevance * 0.42;
+  }
+
+  if (numberConflict) stance -= verdictStatus === "Verified" ? 0.38 : 0.22;
+  if (relevance <= 0.4) stance *= 0.45; // weakly related sources stay near neutral
+  return Math.max(-1, Math.min(1, +stance.toFixed(2)));
+}
+
+const ACTION_GUIDANCE_BY_STATUS = {
+  verified_signal:         "Claim verified by the judge agent — high confidence.",
+  needs_confirmation:      "Plausible but unconfirmed — seek a second source before acting.",
+  conflicting_reports:     "Sources disagree — escalate to a human before acting.",
+  low_evidence_confidence: "Evidence does not support the claim — treat as false / low confidence.",
+  escalate_human_review:   "Low confidence — escalate for human review."
+};
+
+function adaptAgentResult(api, claim, context) {
+  // /api/check wraps the judge response under .raw
+  const j = (api && api.raw) ? api.raw : (api || {});
+  const score = Math.max(0, Math.min(100, Math.round(Number(j.score != null ? j.score : 0))));
+  const status = BACKEND_STATUS_MAP[j.status] || "needs_confirmation";
+
+  // Keep every unique source returned by either evidence extraction or search.
+  // This also protects the map when extraction succeeds for fewer URLs than search.
+  const combinedSources = [];
+  const seenSourceUrls = new Set();
+  [...(j.sources || []), ...(j.search_results || [])].forEach(s => {
+    const key = s.url || s.title;
+    if (!key || seenSourceUrls.has(key) || combinedSources.length >= 12) return;
+    seenSourceUrls.add(key);
+    combinedSources.push(s);
+  });
+
+  let sources = combinedSources.map((s, i) => {
+    const relevance = sourceRelevance(s, claim);
+    return {
+      title: s.title || ("Source " + (i + 1)),
+      url: s.url || "",
+      type: normalizeBackendSourceType(s.source_type, s.url),
+      stance: sourceStance(s, claim, j.status),
+      relevance,
+      summary: s.title || "",
+      extractedEvidence: (s.excerpt && s.excerpt.length > 10)
+        ? s.excerpt
+        : (s.snippet && s.snippet.length > 10)
+          ? s.snippet
+          : (s.title ? ("Source cited by the judge: " + s.title) : "Evidence source from the judge agent."),
+      whyItMatters: "Consulted by the Veritas judge agent when scoring this claim.",
+      locationStatus: context.location ? "available" : "missing",
+      timestampStatus: context.incidentTime ? "recent" : "missing"
+    };
+  });
+
+  if (sources.length === 0) {
+    sources = [{
+      title: "Judge agent (no external sources returned)",
+      url: "", type: "news", stance: 0, relevance: 0.5,
+      summary: "", extractedEvidence: j.reasoning || "No external sources returned.",
+      whyItMatters: "Verdict produced from the agent's own analysis.",
+      locationStatus: "missing", timestampStatus: "missing"
+    }];
+  }
+
+  // reuse the same deterministic rule engine the mock path uses
+  sources = ruleEngine.applyReliability(sources).map(s => ({
+    ...s,
+    reliability: +s.reliability.toFixed(2),
+    recommendedHandling: ruleEngine.recommendHandling(s)
+  }));
+
+  const ranked = [...sources].map(s => ({
+    s, strength: s.reliability * s.relevance * Math.abs(s.stance)
+  })).sort((a, b) => b.strength - a.strength);
+  const supportsCredibility = ranked.filter(r => r.s.stance > 0.1).slice(0, 3).map(r => r.s.extractedEvidence);
+  const reducesConfidence  = ranked.filter(r => r.s.stance < -0.1 || r.s.reliability < 0.35).slice(0, 3).map(r => r.s.extractedEvidence);
+
+  return {
+    mode: "crisis",
+    claim,
+    backendMode: "live",
+    normalizedContext: {
+      inputType: context.inputType,
+      url: context.url,
+      location: context.location,
+      incidentTime: context.incidentTime,
+      claimType: context.claimType || "other"
+    },
+    verificationConfidence: score,
+    status,
+    actionGuidance: ACTION_GUIDANCE_BY_STATUS[status],
+    aiVerdict: {
+      score,
+      reasoning: j.reasoning || "No reasoning returned.",
+      verdict: SAFE_STATUS[status].label
+    },
+    riskDrivers: [
+      { kind: score >= 70 ? "positive" : score <= 30 ? "negative" : "warning",
+        label: "Judge agent score: " + score + "/100 (" + (j.status || "Uncertain") + ")" },
+      { kind: "positive", label: ((j.sources || []).length) + " source(s) consulted" },
+      { kind: "warning", label: "Per-source reliability is estimated from the URL, not independently verified" }
+    ],
+    sources,
+    strongestEvidence: { supportsCredibility, reducesConfidence },
+    _mapData: sources.map((s, i) => ({ ...ruleEngine.toMapCoords(s, i), s }))
+  };
+}
+</script>
+</body>
+</html>
