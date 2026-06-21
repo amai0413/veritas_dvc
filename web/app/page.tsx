@@ -257,6 +257,8 @@ export default function Home() {
 
                 <ScorePanel claim={scored} />
 
+                {scored.status !== "opinion" ? (
+                <>
                 {/* Voting */}
                 <section className={`${CARD} flex flex-wrap items-center justify-between gap-3 p-4`}>
                   <div>
@@ -305,6 +307,8 @@ export default function Home() {
                   Sources shown for live checks are AI-estimated references for this transparency
                   demo, not retrieved citations.
                 </p>
+                </>
+                ) : null}
               </div>
             ) : null}
           </>

@@ -28,6 +28,7 @@ export const DEMO_SCENARIOS: DemoScenario[] = [
     claim: {
       text: "Drinking bleach cures the common cold.",
       aiVerdict: {
+        verifiable: true,
         score: 3,
         reasoning:
           "Ingesting bleach is corrosive and toxic, and no evidence shows it treats any infection. Health authorities explicitly warn against it.",
@@ -111,6 +112,7 @@ export const DEMO_SCENARIOS: DemoScenario[] = [
     claim: {
       text: "mRNA COVID-19 vaccines do not alter your DNA.",
       aiVerdict: {
+        verifiable: true,
         score: 93,
         reasoning:
           "mRNA never enters the cell nucleus and cannot integrate into the genome; regulators and peer-reviewed studies confirm it does not modify human DNA.",
@@ -191,6 +193,7 @@ export const DEMO_SCENARIOS: DemoScenario[] = [
     claim: {
       text: "F-1 students can work off-campus freely after one semester.",
       aiVerdict: {
+        verifiable: true,
         score: 31,
         reasoning:
           "Off-campus employment for F-1 students requires specific authorization (CPT or OPT) and is not automatically allowed after one semester; eligibility depends on the program and prior approval.",

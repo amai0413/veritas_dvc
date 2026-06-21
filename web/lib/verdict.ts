@@ -43,9 +43,15 @@ const SOURCE_SCHEMA = {
 export const VERDICT_SCHEMA = {
   type: "object",
   properties: {
+    verifiable: {
+      type: "boolean",
+      description:
+        "true if the input is a verifiable factual claim that evidence can support or contradict. false for opinions / value judgments / preferences / questions / gibberish / bare keywords / anything too vague to fact-check.",
+    },
     score: {
       type: "integer",
-      description: "0-100. 0 = strongly contradicted, 100 = strongly supported.",
+      description:
+        "0-100. 0 = strongly contradicted, 100 = strongly supported. Only meaningful when verifiable=true; set to 50 when verifiable=false.",
     },
     reasoning: {
       type: "string",
@@ -53,11 +59,12 @@ export const VERDICT_SCHEMA = {
     },
     sources: {
       type: "array",
-      description: "4-6 distinct sources spanning supporting and contradicting stances.",
+      description:
+        "3-4 distinct sources spanning supporting and contradicting stances when verifiable=true; an empty array when verifiable=false.",
       items: SOURCE_SCHEMA,
     },
   },
-  required: ["score", "reasoning", "sources"],
+  required: ["verifiable", "score", "reasoning", "sources"],
   additionalProperties: false,
 } as const;
 
@@ -65,11 +72,12 @@ export const SYSTEM_PROMPT = `You are Veritas, an evidence-analysis engine. Give
 
 Rules:
 - Return a score from 0 (strongly contradicted) to 100 (strongly supported).
-- Surface 4-6 distinct sources spanning the full range of stances you'd expect to find — include contradicting and supporting ones, and a low-reliability source if the claim is mainly spread by such.
+- Surface 3-4 distinct sources spanning the full range of stances you'd expect to find — include contradicting and supporting ones, and a low-reliability source if the claim is mainly spread by such.
 - stance, reliability, and relevance are honest decimal estimates in their stated ranges.
 - Prefer real, well-known institutions (CDC, WHO, peer-reviewed journals, major news) with plausible URLs. These are AI-estimated references for a transparency demo, not retrieved citations.
 - Be calibrated: obvious facts near 100, obvious falsehoods near 0, contested claims in the middle.
-- The middle of the range (~40-60) means a GENUINELY CONTESTED factual claim with credible evidence on both sides. Do NOT use a middling score for input that is not a verifiable factual claim at all — e.g. gibberish, a bare keyword, a question, an opinion, or something too vague to evaluate. For such input, make the reasoning state plainly that it is not a verifiable factual claim, and set the score low (near 0) to reflect that the claim cannot be substantiated rather than implying genuine uncertainty.`;
+- The middle of the range (~40-60) means a GENUINELY CONTESTED factual claim with credible evidence on both sides.
+- CRITICAL — verifiable vs. not: First decide whether the input is even a verifiable factual claim. Opinions ("hackathons are fun", "this movie is the best"), value judgments, personal preferences, predictions, questions, gibberish, bare keywords, and anything too vague are NOT verifiable. For those, set verifiable=false, return an EMPTY sources array, set score=50, and write reasoning that plainly says it is an opinion / not a verifiable factual claim that evidence can prove true or false. NEVER score an opinion low and call it "contradicted" — that wrongly implies it is false. A low score (near 0) is ONLY for a verifiable factual claim that the evidence actually contradicts.`;
 
 export type Effort = "low" | "medium" | "high";
 
@@ -80,7 +88,7 @@ export function clamp(n: unknown, lo: number, hi: number): number {
 }
 
 export type VerdictResult = {
-  aiVerdict: { score: number; reasoning: string };
+  aiVerdict: { score: number; reasoning: string; verifiable: boolean };
   sources: Source[];
   promptTokens: number;
   completionTokens: number;
@@ -106,10 +114,10 @@ function mapSources(raw: unknown): Source[] {
 export async function liveVerdict(
   client: Anthropic,
   claimText: string,
-  opts: { effort?: Effort } = {},
+  opts: { effort?: Effort; model?: string } = {},
 ): Promise<VerdictResult> {
   const response = await client.messages.create({
-    model: MODEL,
+    model: opts.model ?? MODEL,
     max_tokens: 4000,
     output_config: {
       effort: opts.effort ?? "medium",
@@ -124,12 +132,14 @@ export async function liveVerdict(
   if (!textBlock || textBlock.type !== "text") throw new Error("empty_response");
 
   const raw = JSON.parse(textBlock.text);
+  const verifiable = raw.verifiable !== false; // default to verifiable unless explicitly false
   return {
     aiVerdict: {
       score: Math.round(clamp(raw.score, 0, 100)),
       reasoning: String(raw.reasoning ?? ""),
+      verifiable,
     },
-    sources: mapSources(raw.sources),
+    sources: verifiable ? mapSources(raw.sources) : [],
     promptTokens: response.usage?.input_tokens ?? 0,
     completionTokens: response.usage?.output_tokens ?? 0,
   };
@@ -137,7 +147,7 @@ export async function liveVerdict(
 
 // Deterministic mock used when there's no key or a call fails — always renderable.
 export function mockVerdict(claim: string): {
-  aiVerdict: { score: number; reasoning: string };
+  aiVerdict: { score: number; reasoning: string; verifiable: boolean };
   sources: Source[];
 } {
   return {
@@ -145,6 +155,7 @@ export function mockVerdict(claim: string): {
       score: 52,
       reasoning:
         "Sample analysis (no live model call): the evidence here is mixed. Set ANTHROPIC_API_KEY to get a real Claude verdict for this claim.",
+      verifiable: true,
     },
     sources: [
       {

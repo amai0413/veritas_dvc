@@ -104,7 +104,7 @@ export async function POST(request: Request) {
       try {
         const verdict = await arize.tracer.startActiveSpan("anthropic.verdict", {}, parentCtx, async (s) => {
           try {
-            const r = await liveVerdict(client, claimText);
+            const r = await liveVerdict(client, claimText, { effort: "low" });
             s.setAttribute(OI.SPAN_KIND, "LLM");
             s.setAttribute(OI.LLM_PROVIDER, "anthropic");
             s.setAttribute(OI.LLM_SYSTEM, "anthropic");
@@ -125,7 +125,9 @@ export async function POST(request: Request) {
         // Internal self-check — a second Claude pass that grades the verdict's
         // self-consistency. This is OURS (traced as veritas.self_check); it is
         // distinct from the Arize online LLM-as-judge "Veritas Verdict Calibration"
-        // evaluator, which scores the trace from the Arize platform.
+        // evaluator, which scores the trace from the Arize platform. Run inline so
+        // the full 3-span trace (check_claim -> verdict -> self_check) is always
+        // exported deterministically before the response — Arize is the priority.
         await arize.tracer.startActiveSpan("veritas.self_check", {}, parentCtx, async (s) => {
           try {
             const ev = await runEvaluator(client, claimText, verdict);
@@ -170,7 +172,7 @@ export async function POST(request: Request) {
 
   // Phase 1 path: live Claude, no tracing configured.
   try {
-    const r = await liveVerdict(client, claimText);
+    const r = await liveVerdict(client, claimText, { effort: "low" });
     return Response.json({ aiVerdict: r.aiVerdict, sources: r.sources, mock: false });
   } catch (e) {
     Sentry.captureException(e, { tags: { phase: "untraced", route: "check" } });
