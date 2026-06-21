@@ -32,16 +32,38 @@ ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 TRACER = None
 if ENABLE_PHOENIX:
     print("🔍 Setting up Arize/Phoenix tracing...")
-    os.environ.setdefault("PHOENIX_PROJECT_NAME", "veritas-judge-agent")
+    _project = os.environ.setdefault("PHOENIX_PROJECT_NAME", "veritas-judge-agent")
+    _api_key = os.environ.get("PHOENIX_API_KEY") or os.environ.get("ARIZE_API_KEY", "")
+    _endpoint = os.environ.get("PHOENIX_COLLECTOR_ENDPOINT", "")
     try:
-        from phoenix.otel import register
         from openinference.instrumentation.anthropic import AnthropicInstrumentor
-        tracer_provider = register(project_name=os.environ["PHOENIX_PROJECT_NAME"], auto_instrument=True)
-        AnthropicInstrumentor().instrument(tracer_provider=tracer_provider)
-        TRACER = tracer_provider.get_tracer("veritas")
-        print("✅ Arize/Phoenix tracing initialized!")
+        # Arize AX (otlp.arize.com) vs Arize Phoenix Cloud (app.phoenix.arize.com)
+        if "otlp.arize.com" in _endpoint or os.environ.get("ARIZE_API_KEY"):
+            from opentelemetry import trace as _otel_trace
+            from opentelemetry.sdk.trace import TracerProvider
+            from opentelemetry.sdk.trace.export import BatchSpanProcessor
+            from opentelemetry.sdk.resources import Resource
+            from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+            headers = {"api_key": _api_key}
+            if os.environ.get("ARIZE_SPACE_ID"):
+                headers["space_id"] = os.environ["ARIZE_SPACE_ID"]
+            provider = TracerProvider(resource=Resource.create(
+                {"model_id": _project, "service.name": _project}))
+            provider.add_span_processor(BatchSpanProcessor(
+                OTLPSpanExporter(endpoint=_endpoint or "https://otlp.arize.com/v1/traces",
+                                 headers=headers)))
+            _otel_trace.set_tracer_provider(provider)
+            AnthropicInstrumentor().instrument(tracer_provider=provider)
+            TRACER = provider.get_tracer("veritas")
+            print("✅ Arize AX tracing initialized!")
+        else:
+            from phoenix.otel import register
+            tracer_provider = register(project_name=_project, auto_instrument=True)
+            AnthropicInstrumentor().instrument(tracer_provider=tracer_provider)
+            TRACER = tracer_provider.get_tracer("veritas")
+            print("✅ Arize Phoenix tracing initialized!")
     except Exception as e:
-        print(f"⚠️ Phoenix initialization warning: {e}")
+        print(f"⚠️ Tracing initialization warning: {e}")
         print("⚠️ Continuing without tracing...")
 else:
     print("ℹ️ Arize/Phoenix tracing disabled (set ENABLE_PHOENIX=1 + PHOENIX_API_KEY/PHOENIX_COLLECTOR_ENDPOINT to enable).")
