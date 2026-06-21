@@ -77,8 +77,8 @@ export default function ScorePanel({ claim }: { claim: Claim }) {
 
       {isOpinion ? (
         <p className="mt-4 rounded-xl border border-violet-200 bg-violet-50/60 p-3 text-sm leading-relaxed text-violet-800">
-          Veritas only scores verifiable factual claims. This input is a subjective opinion, so
-          there&rsquo;s nothing to verify against evidence — no credibility score is shown.
+          This input can&rsquo;t be assessed against evidence — it looks like gibberish or a bare
+          keyword with no claim to check, so no credibility score is shown.
         </p>
       ) : (
       <>

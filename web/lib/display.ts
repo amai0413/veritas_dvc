@@ -48,7 +48,7 @@ export const STATUS_META: Record<
     accent: "#64748b",
   },
   opinion: {
-    label: "Opinion",
+    label: "Unverifiable",
     chip: "bg-violet-50 border-violet-200",
     text: "text-violet-700",
     accent: "#7c3aed",

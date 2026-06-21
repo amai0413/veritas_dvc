@@ -46,7 +46,7 @@ export const VERDICT_SCHEMA = {
     verifiable: {
       type: "boolean",
       description:
-        "true if the input is a verifiable factual claim that evidence can support or contradict. false for opinions / value judgments / preferences / questions / gibberish / bare keywords / anything too vague to fact-check.",
+        "true for anything evidence can assess — including opinions and subjective statements (score them by how well-supported the stance is). false ONLY for gibberish, random characters, a bare keyword with no proposition, or an empty/meaningless string.",
     },
     score: {
       type: "integer",
@@ -76,8 +76,9 @@ Rules:
 - stance, reliability, and relevance are honest decimal estimates in their stated ranges.
 - Prefer real, well-known institutions (CDC, WHO, peer-reviewed journals, major news) with plausible URLs. These are AI-estimated references for a transparency demo, not retrieved citations.
 - Be calibrated: obvious facts near 100, obvious falsehoods near 0, contested claims in the middle.
-- The middle of the range (~40-60) means a GENUINELY CONTESTED factual claim with credible evidence on both sides.
-- CRITICAL — verifiable vs. not: First decide whether the input is even a verifiable factual claim. Opinions ("hackathons are fun", "this movie is the best"), value judgments, personal preferences, predictions, questions, gibberish, bare keywords, and anything too vague are NOT verifiable. For those, set verifiable=false, return an EMPTY sources array, set score=50, and write reasoning that plainly says it is an opinion / not a verifiable factual claim that evidence can prove true or false. NEVER score an opinion low and call it "contradicted" — that wrongly implies it is false. A low score (near 0) is ONLY for a verifiable factual claim that the evidence actually contradicts.`;
+- The middle of the range (~40-60) means a GENUINELY CONTESTED claim with credible evidence on both sides.
+- Subjective / opinion statements ("hackathons are fun", "this movie is the best") ARE evaluable — set verifiable=true and treat them like any claim: assess how well the stance is SUPPORTED by evidence (surveys, polls, expert or critical consensus, data, sentiment) and score it fairly. A widely-shared, well-supported view scores high; a fringe or poorly-supported one scores low. ALWAYS return real, relevant sources. NEVER dump an opinion to a near-zero score just for being subjective — a near-zero score is reserved for a statement the evidence actively contradicts.
+- Set verifiable=false ONLY for input that genuinely cannot be assessed at all — gibberish, random characters, a bare keyword with no proposition, or an empty/meaningless string. For those only, return an empty sources array, set score=50, and say plainly it is not something evidence can assess.`;
 
 export type Effort = "low" | "medium" | "high";
 
