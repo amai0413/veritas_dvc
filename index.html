@@ -752,6 +752,42 @@ pre#jsonView.show { display: block; }
 .tri-sub-claim { flex: 1; font-size: 13px; color: var(--ink); }
 .tri-sub-status { font-family: var(--mono); font-size: 11px; white-space: nowrap; }
 
+/* ---------- multi-claim cards ---------- */
+#multiRoot { display: none; }
+.multi-head { font-size: 15px; font-weight: 600; color: var(--ink); margin: 6px 2px 14px; }
+.multi-head .multi-note { font-family: var(--mono); font-size: 11px; letter-spacing: 0.04em;
+  color: var(--ink-faint); text-transform: uppercase; margin-left: 8px; }
+.claim-card { margin-bottom: 14px; padding: 14px 16px; }
+.claim-card .cc-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+.cc-badge { font-family: var(--mono); font-size: 12.5px; font-weight: 700; letter-spacing: 0.02em;
+  border: 1.5px solid; border-radius: 999px; padding: 4px 12px; }
+.cc-conf { font-family: var(--mono); font-size: 26px; font-weight: 800; line-height: 1; }
+.cc-conf small { font-size: 10px; font-weight: 600; opacity: 0.7; margin-left: 3px; }
+.cc-claim { font-size: 14.5px; font-weight: 600; color: var(--ink); line-height: 1.4; }
+.cc-summary { font-size: 13px; color: var(--ink-dim); margin-top: 6px; line-height: 1.5; }
+.cc-meta { font-size: 12px; color: var(--ink-faint); margin-top: 8px; }
+.cc-pending { font-size: 13px; color: var(--ink-faint); margin-top: 8px; }
+.cc-spin { display: inline-flex; vertical-align: middle; margin-right: 8px; }
+.cc-subs { margin-top: 10px; border-top: 1px solid var(--line-soft); padding-top: 8px; }
+.cc-sub { display: flex; align-items: center; gap: 8px; padding: 3px 0; font-size: 12.5px; }
+.cc-sub-dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
+.cc-sub-claim { flex: 1; color: var(--ink); }
+.cc-sub-st { font-family: var(--mono); font-size: 11px; white-space: nowrap; }
+.cc-actions { margin-top: 12px; display: flex; justify-content: flex-end; }
+.cc-details {
+  font-family: var(--mono); font-size: 12px; letter-spacing: 0.04em; cursor: pointer;
+  color: var(--teal); background: transparent; border: 1px solid var(--teal-dim);
+  border-radius: 6px; padding: 5px 14px; transition: background 0.15s, color 0.15s;
+}
+.cc-details:hover { background: var(--teal); color: #04201d; }
+.back-to-claims {
+  display: block; margin-bottom: 14px; cursor: pointer;
+  font-family: var(--mono); font-size: 12.5px; color: var(--ink-dim);
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--radius-sm);
+  padding: 8px 14px; width: fit-content;
+}
+.back-to-claims:hover { color: var(--ink); border-color: var(--teal); }
+
 /* accessibility: focus + reduced motion */
 :focus-visible { outline: 2px solid var(--teal); outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) {
@@ -900,6 +936,9 @@ pre#jsonView.show { display: block; }
       <div class="pipe-bar"><span id="pipeBarFill"></span></div>
     </div>
   </section>
+
+  <!-- ============ MULTI-CLAIM RESULTS ============ -->
+  <div class="results" id="multiRoot" style="display:none"></div>
 
   <!-- ============ 5–8. RESULTS ============ -->
   <div class="results" id="resultsRoot">
@@ -1376,8 +1415,12 @@ const PIPE_STEPS = [
 ];
 
 function runAnalysis() {
-  // hide any prior results
+  // hide & fully clear any prior results (single OR multi) so a new run never
+  // leaves a stale screen behind when the tab isn't refreshed
   $("#resultsRoot").classList.remove("show");
+  const mr = $("#multiRoot"); mr.style.display = "none"; mr.innerHTML = "";
+  state.multiVerdicts = {};
+  { const bb = $("#backToClaims"); if (bb) bb.style.display = "none"; }
   state.selectedSourceIdx = null;
   $("#pipeHint").textContent = "live — streaming agent progress";
   $("#pipeHint").style.color = "";
@@ -1406,6 +1449,7 @@ function runAnalysis() {
     language: state.detectedLanguage || undefined,
     locationEn: state.detectedLocationEn || undefined
   };
+  state.lastContext = context;  // reused when opening a claim's full details
   const claim = $("#mainInput").value.trim();
 
   // ---- drive the pipeline from REAL backend progress (SSE) ----
@@ -1435,6 +1479,7 @@ function runAnalysis() {
     setTimeout(() => {
       setStep(4, "done");
       $("#pipelinePanel").style.display = "none";
+      const bb = $("#backToClaims"); if (bb) bb.style.display = "none";  // single-claim: no back bar
       renderResults(result);
     }, 260);
   }
@@ -1450,8 +1495,9 @@ function runAnalysis() {
   (async () => {
     setStep(0, "active", "contacting search agent…");
     // watchdog: never let the pipeline hang forever if the backend stalls
+    // (multi-claim runs several pipelines in parallel, so allow more time)
     const ctrl = new AbortController();
-    const watchdog = setTimeout(() => ctrl.abort(), 60000);
+    const watchdog = setTimeout(() => ctrl.abort(), 120000);
     let res;
     try {
       res = await fetch('/api/check/stream', {
@@ -1475,8 +1521,14 @@ function runAnalysis() {
       if (!res.ok || !res.body) throw new Error('stream_unavailable ' + (res && res.status));
     } catch (err) { clearTimeout(watchdog); return showBackendError(err); }
 
+    let multiActive = false;
     function handleEvent(evt) {
-      if (evt.stage === "resolve") {
+      if (evt.stage === "multi") {
+        multiActive = true;
+        renderMultiSkeleton(evt.claims || []);
+      } else if (evt.stage === "claim_result") {
+        renderClaimCard(evt.index, evt.verdict || {});
+      } else if (evt.stage === "resolve") {
         if (evt.status === "active") setStep(0, "active", "reading linked page…");
         else if (evt.status === "done") setStep(0, "active", evt.claim ? "claim extracted from link" : "using link as claim");
       } else if (evt.stage === "search") {
@@ -1513,8 +1565,14 @@ function runAnalysis() {
     } catch (err) { clearTimeout(watchdog); return showBackendError(err); }
 
     clearTimeout(watchdog);
-    if (finalRaw) finishWithResult(finalRaw);
-    else showBackendError(new Error(gotError ? "backend error" : "no result"));
+    if (multiActive) {
+      // multi-claim cards were rendered live; nothing more to finalize
+      $("#multiRoot").scrollIntoView({ behavior: "smooth", block: "start" });
+    } else if (finalRaw) {
+      finishWithResult(finalRaw);
+    } else {
+      showBackendError(new Error(gotError ? "backend error" : "no result"));
+    }
   })();
 }
 
@@ -1532,6 +1590,97 @@ function renderResults(r) {
   $("#resultsRoot").classList.add("show");
   $("#resultsRoot").scrollIntoView({ behavior: "smooth", block: "start" });
 }
+
+/* ============================================================
+   MULTI-CLAIM RESULTS — one card per independent claim
+   ============================================================ */
+function showMultiRoot(show) {
+  $("#multiRoot").style.display = show ? "block" : "none";
+  if (show) $("#resultsRoot").classList.remove("show");
+}
+
+function renderMultiSkeleton(claims) {
+  $("#pipelinePanel").style.display = "none";
+  state.multiVerdicts = {};
+  const root = $("#multiRoot");
+  root.innerHTML =
+    `<div class="multi-head">Multiple claims detected — verifying ${claims.length} independently
+       <span class="multi-note">evidence confidence, not absolute truth</span></div>` +
+    claims.map((c, i) => `
+      <section class="panel claim-card" id="cc-${i}">
+        <div class="cc-claim"><span class="cc-spin"><span class="spinner"></span></span>${escapeHtml(c)}</div>
+        <div class="cc-pending">Verifying…</div>
+      </section>`).join("");
+  showMultiRoot(true);
+  root.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function renderClaimCard(index, v) {
+  const card = $("#cc-" + index);
+  if (!card) return;
+  v = v || {};
+  (state.multiVerdicts || (state.multiVerdicts = {}))[index] = v;  // for the Details view
+  const status = v.triage_status || "Unconfirmed";
+  const color = TRIAGE_COLORS[status] || "var(--st-needs)";
+  const conf = (v.evidence_confidence != null) ? v.evidence_confidence : "—";
+  const official = OFFICIAL_LABELS[v.official_confirmation] || "";
+  const nSources = (v.sources || []).length;
+  const subs = (v.subclaims || []).slice(0, 4).map(s => {
+    const sc = TRIAGE_COLORS[s.status] || "var(--ink-faint)";
+    return `<div class="cc-sub"><span class="cc-sub-dot" style="background:${sc}"></span>
+      <span class="cc-sub-claim">${escapeHtml(s.claim || "")}</span>
+      <span class="cc-sub-st" style="color:${sc}">${escapeHtml(s.status || "")} · ${Math.round(s.confidence || 0)}</span></div>`;
+  }).join("");
+  card.style.borderLeft = `4px solid ${color}`;
+  card.innerHTML = `
+    <div class="cc-top">
+      <span class="cc-badge" style="color:${color};border-color:${color};background:color-mix(in srgb, ${color} 14%, transparent)">${escapeHtml(status)}</span>
+      <span class="cc-conf" style="color:${color}">${conf}<small>conf</small></span>
+    </div>
+    <div class="cc-claim">${escapeHtml(v.claim || "")}</div>
+    ${v.summary ? `<div class="cc-summary">${escapeHtml(v.summary)}</div>` : ""}
+    <div class="cc-meta">${official ? escapeHtml(official) + " · " : ""}${nSources} source(s)</div>
+    ${subs ? `<div class="cc-subs">${subs}</div>` : ""}
+    <div class="cc-actions"><button class="cc-details" data-i="${index}">Details ▸</button></div>
+  `;
+}
+
+// Open the full single-claim view (2D map, triage, evidence) for a card.
+// Hide the card list while drilled in; the back bar restores it.
+function openClaimDetails(index) {
+  const v = (state.multiVerdicts || {})[index];
+  if (!v) return;
+  const result = adaptAgentResult(v, v.claim || "", state.lastContext || {});
+  state.lastResult = result;
+  $("#multiRoot").style.display = "none";  // show only the detail view
+  renderResults(result);                    // shows #resultsRoot with the classic layout
+  ensureBackBar();                          // add "back to all claims" on top
+}
+
+function ensureBackBar() {
+  const root = $("#resultsRoot");
+  let bar = $("#backToClaims");
+  if (!bar) {
+    bar = document.createElement("button");
+    bar.id = "backToClaims";
+    bar.className = "back-to-claims";
+    bar.textContent = "◄ Back to all claims";
+    bar.addEventListener("click", () => {
+      root.classList.remove("show");
+      bar.style.display = "none";
+      $("#multiRoot").style.display = "block";   // restore the card list
+      $("#multiRoot").scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  }
+  root.insertBefore(bar, root.firstChild);  // keep it at the very top
+  bar.style.display = "block";
+}
+
+// delegated: Details buttons are (re)rendered into #multiRoot via innerHTML
+$("#multiRoot").addEventListener("click", (e) => {
+  const btn = e.target.closest(".cc-details");
+  if (btn) openClaimDetails(+btn.dataset.i);
+});
 
 /* ---- crisis triage panel (evidence-centric, not absolute truth) ---- */
 const TRIAGE_COLORS = {
@@ -1591,7 +1740,7 @@ function renderTriage(r) {
           <span class="tri-conf-cap">evidence confidence · 0–100</span>
         </div>
       </div>
-      <div class="tri-disclaimer">⚠️ ${escapeHtml(t.disclaimer)}（これは絶対的な真実判定ではなく、現時点の証拠の強さです）</div>
+      <div class="tri-disclaimer">⚠️ ${escapeHtml(t.disclaimer)}</div>
       ${t.originalSource ? `<div class="tri-origin">
         <span class="tri-origin-h">Original source (being verified)</span>
         ${t.originalSource.url ? `<a class="tri-origin-url" href="${escapeHtml(t.originalSource.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(t.originalSource.title || t.originalSource.url)} ↗</a>` : ""}
@@ -1915,6 +2064,7 @@ function resetAll() {
   $("#clarifyPanel").style.display = "none";
   $("#pipelinePanel").style.display = "none";
   $("#resultsRoot").classList.remove("show");
+  $("#multiRoot").style.display = "none";
   $("#mainInput").focus();
 }
 

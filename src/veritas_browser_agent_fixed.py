@@ -10,6 +10,7 @@ import anthropic
 from urllib.parse import urlparse
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ========== ARIZE PHOENIX TRACING (opt-in) ==========
 # The hosted Phoenix endpoint has been returning 500s and retrying, which adds
@@ -22,21 +23,55 @@ CORS(app)
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
-# ========== ARIZE PHOENIX SETUP ==========
+# ========== ARIZE / PHOENIX TRACING (opt-in) ==========
+# TRACER lets us emit explicit OpenTelemetry trace "signals" for the LLM steps
+# (time/location extraction + triage) so an Arize/Phoenix dashboard shows what
+# the model predicted, not just that a call happened. Credentials are read from
+# the environment by phoenix.otel.register():
+#   PHOENIX_API_KEY, PHOENIX_COLLECTOR_ENDPOINT  (Arize Phoenix Cloud)
+TRACER = None
 if ENABLE_PHOENIX:
-    print("🔍 Setting up Arize Phoenix tracing...")
+    print("🔍 Setting up Arize/Phoenix tracing...")
     os.environ.setdefault("PHOENIX_PROJECT_NAME", "veritas-judge-agent")
     try:
         from phoenix.otel import register
         from openinference.instrumentation.anthropic import AnthropicInstrumentor
-        tracer_provider = register(project_name="veritas-judge-agent", auto_instrument=True)
+        tracer_provider = register(project_name=os.environ["PHOENIX_PROJECT_NAME"], auto_instrument=True)
         AnthropicInstrumentor().instrument(tracer_provider=tracer_provider)
-        print("✅ Arize Phoenix tracing initialized!")
+        TRACER = tracer_provider.get_tracer("veritas")
+        print("✅ Arize/Phoenix tracing initialized!")
     except Exception as e:
         print(f"⚠️ Phoenix initialization warning: {e}")
         print("⚠️ Continuing without tracing...")
 else:
-    print("ℹ️ Phoenix tracing disabled (set ENABLE_PHOENIX=1 to enable).")
+    print("ℹ️ Arize/Phoenix tracing disabled (set ENABLE_PHOENIX=1 + PHOENIX_API_KEY/PHOENIX_COLLECTOR_ENDPOINT to enable).")
+
+from contextlib import contextmanager
+
+@contextmanager
+def trace_span(name, **attrs):
+    """Open an OTel span (no-op when tracing is disabled) and attach attributes
+    as Arize/Phoenix 'signals'. Use .set_attribute on the yielded span to add
+    predicted values once they're computed."""
+    if TRACER is None:
+        yield None
+        return
+    with TRACER.start_as_current_span(name) as span:
+        for k, v in attrs.items():
+            try:
+                span.set_attribute(k, v if isinstance(v, (str, int, float, bool)) else str(v))
+            except Exception:
+                pass
+        yield span
+
+def _span_set(span, **attrs):
+    if span is None:
+        return
+    for k, v in attrs.items():
+        try:
+            span.set_attribute(k, v if isinstance(v, (str, int, float, bool)) else str(v))
+        except Exception:
+            pass
 
 # ========== AGENT ENDPOINTS ==========
 SEARCHER_AGENT_URL = os.environ.get(
@@ -214,7 +249,7 @@ def enrich_evidence_with_snippets(search_results, evidence):
     Falls back to the snippet when extracted content is short."""
     by_url = {e.get("url", ""): e for e in (evidence or [])}
     merged = []
-    for s in search_results[:12]:
+    for s in search_results[:16]:  # full candidate pool; select_evidence trims it
         url = s.get("url", "")
         snippet = (s.get("snippet", "") or "").strip()
         e = by_url.get(url)
@@ -469,6 +504,19 @@ def extract_context_fallback(claim):
             "claim_type": claim_type, "language": "en"}
 
 def extract_context(claim):
+    """Time/location/type extraction, traced to Arize/Phoenix as a span whose
+    attributes are the predicted values (the 'signals' a judge can inspect)."""
+    with trace_span("extract_context.time_location", **{"input.claim": (claim or "")[:500]}) as span:
+        result = _extract_context_impl(claim)
+        _span_set(span,
+                  **{"predicted.location": str(result.get("location")),
+                     "predicted.location_en": str(result.get("location_en")),
+                     "predicted.datetime": str(result.get("datetime")),
+                     "predicted.claim_type": str(result.get("claim_type")),
+                     "predicted.language": str(result.get("language"))})
+        return result
+
+def _extract_context_impl(claim):
     """Use Claude to read the incident location, date/time, and type from the claim text."""
     fallback = extract_context_fallback(claim)
     if not ANTHROPIC_API_KEY:
@@ -1058,7 +1106,8 @@ def build_verdict_sources(claim, evidence, verdict):
     assessments = verdict.get("evidence_assessments") or []
     by_url = {item.get("url", ""): item for item in assessments if item.get("url")}
     sources = []
-    for item in evidence[:12]:
+    # evidence is already trimmed by select_evidence; show exactly what was used
+    for item in evidence:
         assessment = by_url.get(item.get("url", ""), {})
         sources.append({
             "title": item.get("title", "Source"),
@@ -1145,7 +1194,47 @@ def deterministic_assessments(claim, evidence):
     ctx = extract_context_fallback(claim)
     return [assess_evidence_item(claim, item, ctx) for item in evidence or []]
 
+def select_evidence(claim, context, evidence, max_keep=10, min_keep=3, rel_floor=0.22):
+    """Pick the sources that are actually relevant to THIS claim, so the evidence
+    set (and the displayed source count) varies by case instead of always being a
+    fixed top-N. Authoritative sources clear a lower relevance bar; if too few
+    pass, fall back to the strongest available so we never show nothing."""
+    if not evidence:
+        return []
+    ctx = {
+        "location": (context or {}).get("location"),
+        "claim_type": (context or {}).get("claimType") or (context or {}).get("claim_type"),
+    }
+    scored = []
+    for item in evidence:
+        rel = assess_evidence_item(claim, item, ctx).get("relevance", 0) or 0
+        official = item.get("source_type") in OFFICIAL_TYPES
+        scored.append((rel, official, item))
+    kept = [t for t in scored if t[0] >= rel_floor or (t[1] and t[0] >= 0.10)]
+    kept.sort(key=lambda t: (t[1], t[0]), reverse=True)
+    if len(kept) < min_keep:
+        kept = sorted(scored, key=lambda t: (t[1], t[0]), reverse=True)[:min_keep]
+    selected = [item for (_, _, item) in kept[:max_keep]]
+    print(f"🔎 Selected {len(selected)}/{len(evidence)} relevant sources", flush=True)
+    return selected
+
 def triage_analysis(claim, context, evidence):
+    """Crisis-triage call, traced to Arize/Phoenix with the verdict as signals."""
+    with trace_span("triage_analysis", **{
+        "input.claim": (claim or "")[:500],
+        "input.language": (context or {}).get("language") or "en",
+        "input.evidence_count": len(evidence or []),
+    }) as span:
+        result = _triage_analysis_impl(claim, context, evidence)
+        if result:
+            _span_set(span,
+                      **{"triage.status": result.get("triage_status"),
+                         "triage.evidence_confidence": result.get("evidence_confidence"),
+                         "triage.official_confirmation": result.get("official_confirmation"),
+                         "triage.subclaims": len(result.get("subclaims") or [])})
+        return result
+
+def _triage_analysis_impl(claim, context, evidence):
     """Single structured Claude call producing the full crisis-triage verdict.
     Returns None if unavailable so the caller can fall back to judge_claim()."""
     if not ANTHROPIC_API_KEY:
@@ -1315,6 +1404,64 @@ def run_triage(claim, context, evidence):
     verdict.setdefault("disclaimer", "This is evidence confidence, not absolute truth.")
     return verdict
 
+# ========== MULTI-CLAIM (split independent claims, verify each) ==========
+def _maybe_multiclaim(text):
+    """Cheap gate: only attempt a split when the text plausibly holds >1 claim,
+    so single claims don't pay an extra LLM call. Counts sentence terminators
+    followed by a space/end (so decimals like '5.8' aren't miscounted) — two or
+    more sentences is the trigger."""
+    t = (text or "").strip()
+    if len(t) < 25:
+        return False
+    sentences = len(re.findall(r'[.。!?！？;](?:\s|$)', t)) + t.count("\n")
+    return sentences >= 2
+
+def split_claims(text, max_claims=5):
+    """Split free text into independent, separately-checkable claims.
+    Returns a list (length 1 means treat as a single claim)."""
+    if not ANTHROPIC_API_KEY:
+        return [text]
+    prompt = (
+        "Split the text into INDEPENDENT, separately fact-checkable claims. "
+        "Two assertions about the SAME event/incident are ONE claim — only split "
+        "claims that are about genuinely different topics or events. Rewrite each "
+        "as a standalone sentence in the text's original language. If the text is "
+        "really a single claim, return just that one.\n\n"
+        f"TEXT: \"{text}\"\n\n"
+        'Return ONLY JSON: {"claims": ["claim 1", "claim 2"]}'
+    )
+    try:
+        resp = claude.messages.create(
+            model=FAST_MODEL, max_tokens=400, temperature=0,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        data = parse_judge_json(resp.content[0].text)
+        claims = [str(c).strip() for c in (data.get("claims") or []) if str(c).strip()]
+    except Exception as e:
+        print(f"⚠️ split_claims error: {e}", flush=True)
+        return [text]
+    # dedupe (case-insensitive), cap
+    seen, out = set(), []
+    for c in claims:
+        k = c.lower()
+        if k not in seen:
+            seen.add(k); out.append(c)
+    return out[:max_claims] or [text]
+
+def build_full_verdict(claim, context):
+    """Run the whole pipeline for one claim (no SSE) and return its verdict.
+    Used by the multi-claim parallel path; safe to run in a worker thread."""
+    incident_type = (context or {}).get('claimType')
+    search_results = search_web(claim, incident_type, context)
+    evidence = extract_evidence(search_results)
+    evidence = enrich_evidence_with_snippets(search_results, evidence)
+    evidence = select_evidence(claim, context, evidence)
+    verdict = run_triage(claim, context, evidence)
+    verdict["claim"] = claim
+    verdict["sources"] = build_verdict_sources(claim, evidence, verdict)
+    verdict["search_results"] = build_search_results(search_results)
+    return verdict
+
 # ========== URL MODE (Phase 2): verify the article/post, not the URL string ==========
 def looks_like_url(text):
     return bool(re.match(r'^https?://', (text or "").strip(), re.I))
@@ -1469,8 +1616,10 @@ def evaluate():
         # STEP 2: Extract evidence
         evidence = extract_evidence(search_results)
 
-        # STEP 2.5: Make sure search snippets (USGS / news) reach the judge
+        # STEP 2.5: Make sure search snippets (USGS / news) reach the judge,
+        # then select the genuinely relevant ones (count varies by case).
         evidence = enrich_evidence_with_snippets(search_results, evidence)
+        evidence = select_evidence(claim, context, evidence)
 
         # STEP 3: Crisis triage (context-aware, structured) — backend is the
         # single source of truth for the verdict.
@@ -1547,6 +1696,30 @@ def evaluate_stream():
                                "original_source": original_source})
                     return
 
+            # STEP 0.5: multi-claim — split independent claims and verify each in
+            # parallel. Only for text mode (a resolved URL is treated as one claim).
+            if original_source is None and _maybe_multiclaim(claim):
+                claims = split_claims(claim)
+                if len(claims) > 1:
+                    print(f"🧩 Multi-claim: {len(claims)} claims detected")
+                    yield sse({"stage": "multi", "claims": claims})
+                    with ThreadPoolExecutor(max_workers=min(5, len(claims))) as ex:
+                        futures = {ex.submit(build_full_verdict, c, context): (i, c)
+                                   for i, c in enumerate(claims)}
+                        done = 0
+                        for fut in as_completed(futures):
+                            i, c = futures[fut]
+                            try:
+                                v = fut.result()
+                            except Exception as e:
+                                v = {"claim": c, "error": str(e), "triage_status": "Unconfirmed",
+                                     "evidence_confidence": 0, "summary": "Verification failed."}
+                            done += 1
+                            yield sse({"stage": "claim_result", "index": i,
+                                       "total": len(claims), "done": done, "verdict": v})
+                    yield sse({"stage": "done"})
+                    return
+
             # STEP 1: search (routed by incident type + user context)
             yield sse({"stage": "search", "status": "active"})
             search_results = search_web(claim, incident_type, context)
@@ -1556,6 +1729,7 @@ def evaluate_stream():
             yield sse({"stage": "extract", "status": "active"})
             evidence = extract_evidence(search_results)
             evidence = enrich_evidence_with_snippets(search_results, evidence)
+            evidence = select_evidence(claim, context, evidence)
             yield sse({"stage": "extract", "status": "done", "count": len(evidence)})
 
             # STEP 3: crisis triage (context-aware, structured)
