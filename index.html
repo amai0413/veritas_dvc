@@ -1837,6 +1837,11 @@ function normalizeBackendSourceType(sourceType, url) {
 }
 
 function sourceRelevance(source, claim) {
+  const backendRelevance = source.relevance ?? source.relevance_score;
+  if (backendRelevance !== null && backendRelevance !== undefined &&
+      backendRelevance !== "" && Number.isFinite(Number(backendRelevance))) {
+    return Math.max(0, Math.min(1, Number(backendRelevance)));
+  }
   const stop = new Set(["the","and","for","from","with","that","this","was","were","are","has","have","into","some"]);
   const tokens = [...new Set((claim.toLowerCase().match(/[a-z0-9]+/g) || [])
     .filter(w => w.length >= 3 && !stop.has(w)))];

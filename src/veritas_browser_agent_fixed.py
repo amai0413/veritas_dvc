@@ -5,6 +5,8 @@ import re
 import json
 import requests
 import anthropic
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 
 # ========== ARIZE PHOENIX TRACING (opt-in) ==========
 # The hosted Phoenix endpoint has been returning 500s and retrying, which adds
@@ -70,11 +72,11 @@ def search_web(claim, incident_type=None):
             return []
 
     except requests.exceptions.ConnectionError:
-        print("⚠️ Searcher Agent not running! Using mock data.")
-        return mock_search_results(claim)
+        print("⚠️ Searcher Agent not running; returning no evidence.")
+        return []
     except Exception as e:
         print(f"❌ Search error: {e}")
-        return mock_search_results(claim)
+        return []
 
 # ========== EXTRACT FUNCTION ==========
 def extract_evidence(sources):
@@ -209,6 +211,12 @@ def enrich_evidence_with_snippets(search_results, evidence):
             "url": url,
             "content": content or snippet or s.get("title", ""),
             "source_type": s.get("source_type", "general"),
+            "published": s.get("published", ""),
+            "publisher": s.get("publisher", ""),
+            "provider": s.get("provider", ""),
+            "relevance_score": s.get("relevance_score"),
+            "freshness_score": s.get("freshness_score"),
+            "rank_score": s.get("rank_score"),
         })
     return merged
 
@@ -505,9 +513,16 @@ def judge_claim(claim, evidence):
         for i, e in enumerate(evidence):
             content = e.get('content', '')
             if content and len(content) > 50:
-                evidence_text += f"\nSource {i+1}: {e.get('title', 'Untitled')}\nContent: {content[:1500]}\n"
+                evidence_text += (
+                    f"\nSource {i+1}: {e.get('title', 'Untitled')}\n"
+                    f"Type: {e.get('source_type', 'unknown')}\n"
+                    f"Published: {e.get('published') or 'unknown'}\n"
+                    f"Searcher relevance: {e.get('relevance_score')}\n"
+                    f"Searcher freshness: {e.get('freshness_score')}\n"
+                    f"Content: {content[:1500]}\n"
+                )
     else:
-        evidence_text = "No specific evidence found. Use your general knowledge."
+        evidence_text = "No specific evidence found."
 
     # Build the prompt for Claude
     prompt = f"""You are Veritas, an AI truth-judge. Evaluate this claim based on the provided evidence.
@@ -516,6 +531,13 @@ CLAIM: "{claim}"
 
 EVIDENCE:
 {evidence_text}
+
+Use only the supplied evidence. For claims about current disasters or recent
+events, prioritize newer reports and authoritative feeds. Distinguish:
+- direct support for the exact location, time, severity, and status;
+- contradiction of a concrete detail;
+- merely related background that neither supports nor contradicts.
+Do not treat a search page or a source repeating the query as confirmation.
 
 Based on the evidence, provide:
 1. A SCORE from 0-100
@@ -530,7 +552,8 @@ Based on the evidence, provide:
 Return ONLY valid JSON in this format:
 {{"score": 75, "reasoning": "The evidence supports this claim because...", "status": "Verified"}}
 
-Make sure your response is ONLY the JSON object, nothing else.
+If evidence is missing, stale, weakly related, or does not establish the exact
+claim, use Uncertain rather than guessing. Output ONLY the JSON object.
 """
 
     try:
@@ -563,7 +586,13 @@ Make sure your response is ONLY the JSON object, nothing else.
         return {
             "score": score,
             "reasoning": reasoning,
-            "status": status
+            "status": status,
+            # Keep per-source scoring deterministic so the graph remains
+            # explainable even when Claude supplies the overall verdict.
+            "evidence_assessments": [
+                assess_evidence_item(claim, item, extract_context_fallback(claim))
+                for item in evidence or []
+            ],
         }
 
     except Exception as e:
@@ -571,9 +600,415 @@ Make sure your response is ONLY the JSON object, nothing else.
         return judge_fallback(claim, evidence)
 
 # ========== FALLBACK JUDGE ==========
+SPORTS_TERM_CORRECTIONS = {
+    r"\btsunizia\b": "tunisia",
+    r"\btunizia\b": "tunisia",
+    r"\bworldcup\b": "world cup",
+}
+
+def normalize_sports_text(text):
+    normalized = re.sub(r"\s+", " ", (text or "")).strip().lower()
+    for pattern, replacement in SPORTS_TERM_CORRECTIONS.items():
+        normalized = re.sub(pattern, replacement, normalized, flags=re.IGNORECASE)
+    return normalized
+
+def parse_sports_result_claim(claim):
+    text = normalize_sports_text(claim)
+    match = re.match(
+        r"^\s*(.+?)\s+(won|lost|beat|defeated)\s+(?:against|to)?\s*(.+?)"
+        r"(?:\s+(?:for|in|at)\s+(?:the\s+)?world cup)?\s*$",
+        text,
+    )
+    if not match:
+        return None
+    subject = match.group(1).strip(" ,.")
+    verb = match.group(2)
+    opponent = match.group(3).strip(" ,.")
+    claimed_winner = opponent if verb == "lost" else subject
+    return {"subject": subject, "opponent": opponent, "winner": claimed_winner}
+
+def infer_match_winner(text, first_team, second_team):
+    text = normalize_sports_text(text)
+    a, b = re.escape(first_team), re.escape(second_team)
+
+    for left, right in ((first_team, second_team), (second_team, first_team)):
+        pattern = rf"\b{re.escape(left)}\s+(\d+)\s*[-–:]\s*(\d+)\s+{re.escape(right)}\b"
+        match = re.search(pattern, text)
+        if match:
+            left_score, right_score = int(match.group(1)), int(match.group(2))
+            if left_score != right_score:
+                return left if left_score > right_score else right
+
+    winner_patterns = (
+        rf"\b({a}|{b})(?:['’]s)?\s+\d+\s*[-–]\s*\d+\s+win\s+(?:over|against)\s+({a}|{b})\b",
+        rf"\b({a}|{b}).{{0,45}}\b(?:defeated|beat|beats|thrashed|routed|"
+        rf"knocked|knocks|knock|eliminated|eliminates|eliminate)\s+({a}|{b})\b",
+    )
+    for pattern in winner_patterns:
+        match = re.search(pattern, text)
+        if match and match.group(1) != match.group(2):
+            return match.group(1)
+
+    loser_pattern = rf"\b({a}|{b}).{{0,30}}\b(?:lost|loss|defeat)\s+(?:to|against)\s+({a}|{b})\b"
+    match = re.search(loser_pattern, text)
+    if match and match.group(1) != match.group(2):
+        return match.group(2)
+    return None
+
+def judge_sports_result(claim, evidence):
+    parsed = parse_sports_result_claim(claim)
+    if not parsed:
+        return None
+
+    trust = {
+        "government": 1.0, "education": 0.9, "research": 0.85,
+        "fact_check": 0.9, "news_reputable": 0.9, "news": 0.75,
+        "encyclopedia": 0.65, "general": 0.45, "unknown": 0.35,
+    }
+    support_mass = contradiction_mass = 0.0
+    matched_sources = 0
+    observed_winners = []
+    assessments = []
+    for item in evidence or []:
+        source_text = " ".join((item.get("title", "") or "", item.get("content", "") or ""))
+        winner = infer_match_winner(source_text, parsed["subject"], parsed["opponent"])
+        if not winner:
+            continue
+        matched_sources += 1
+        observed_winners.append(winner.title())
+        weight = trust.get(item.get("source_type", "unknown"), 0.4)
+        supports = winner == parsed["winner"]
+        if supports:
+            support_mass += weight
+        else:
+            contradiction_mass += weight
+        assessments.append({
+            "url": item.get("url", ""),
+            "title": item.get("title", "Source"),
+            "stance": round(0.92 if supports else -0.92, 3),
+            "relevance": 1.0,
+            "freshness": round(evidence_freshness(item, current_claim=True), 3),
+            "trust": round(weight, 3),
+            "weight": round(weight * evidence_freshness(item, current_claim=True), 4),
+            "support_reasons": ["match_winner"] if supports else [],
+            "contradiction_reasons": [] if supports else ["match_winner"],
+        })
+
+    total = support_mass + contradiction_mass
+    if total == 0:
+        return {
+            "score": 30,
+            "reasoning": (
+                "No source with a concrete score or unambiguous match result was found. "
+                "The claim cannot be verified from the available evidence."
+            ),
+            "status": "Uncertain",
+            "evidence_assessments": assessments,
+        }
+
+    support_ratio = support_mass / total
+    if support_ratio >= 0.67:
+        score, status = min(95, round(72 + support_ratio * 23)), "Verified"
+        conclusion = "The reported match result supports the claim."
+    elif support_ratio <= 0.33:
+        score, status = max(5, round(28 * support_ratio)), "False"
+        conclusion = "The reported match result contradicts the claim."
+    else:
+        score, status = 50, "Disputed"
+        conclusion = "The available match reports conflict."
+
+    winner_summary = ", ".join(sorted(set(observed_winners)))
+    return {
+        "score": score,
+        "reasoning": (
+            f"{matched_sources} source(s) provided a concrete result; "
+            f"the observed winner was {winner_summary}. {conclusion}"
+        ),
+        "status": status,
+        "evidence_assessments": assessments,
+    }
+
+EVIDENCE_TRUST = {
+    "government": 1.0, "education": 0.94, "research": 0.88,
+    "fact_check": 0.9, "news_reputable": 0.86, "news": 0.68,
+    "encyclopedia": 0.55, "general": 0.4, "unknown": 0.3,
+}
+
+JUDGE_STOPWORDS = {
+    "about", "after", "again", "against", "also", "and", "are", "as", "at",
+    "be", "been", "before", "but", "by", "for", "from", "had", "has", "have",
+    "in", "into", "is", "it", "its", "near", "of", "on", "or", "some",
+    "that", "the", "their", "there", "this", "to", "toward", "was", "were",
+    "with", "reports", "report", "immediate",
+}
+
+STATE_CONCEPTS = {
+    "damage": ("damage", "damaged", "destruction"),
+    "casualties": ("casualties", "casualty", "injuries", "injured", "deaths", "dead", "killed"),
+    "tsunami_warning": ("tsunami warning", "tsunami alert"),
+    "evacuation": ("evacuation", "evacuated", "evacuate"),
+    "open": ("open", "opened", "accepting"),
+    "closed": ("closed", "closure", "shut"),
+    "collapsed": ("collapsed", "collapse"),
+    "passable": ("passable", "impassable"),
+}
+
+ANTONYM_STATES = (
+    (("open", "opened", "accepting"), ("closed", "closure", "shut")),
+    (("passable",), ("impassable", "blocked")),
+    (("standing", "intact"), ("collapsed", "collapse", "destroyed")),
+)
+
+def parse_evidence_datetime(value):
+    if not value:
+        return None
+    try:
+        if re.fullmatch(r"\d{8}T\d{6}Z", value):
+            return datetime.strptime(value, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+        parsed = parsedate_to_datetime(value)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except Exception:
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
+        except Exception:
+            return None
+
+def evidence_freshness(item, current_claim=True):
+    supplied = item.get("freshness_score")
+    if supplied is not None:
+        try:
+            return max(0.05, min(1.0, float(supplied)))
+        except (TypeError, ValueError):
+            pass
+    published = parse_evidence_datetime(item.get("published", ""))
+    if not published:
+        return 0.7 if item.get("source_type") == "government" else 0.3
+    if not current_claim:
+        return 0.75
+    age_hours = max(0.0, (datetime.now(timezone.utc) - published).total_seconds() / 3600)
+    if age_hours <= 24:
+        return 1.0
+    if age_hours <= 72:
+        return 0.9
+    if age_hours <= 24 * 7:
+        return 0.78
+    if age_hours <= 24 * 30:
+        return 0.58
+    if age_hours <= 24 * 180:
+        return 0.3
+    return 0.1
+
+def normalized_tokens(text):
+    return {
+        token for token in re.findall(r"[a-z0-9]+", (text or "").lower())
+        if len(token) >= 3 and token not in JUDGE_STOPWORDS
+    }
+
+def concept_state(text, aliases):
+    lowered = (text or "").lower()
+    found = False
+    state = 0
+    for alias in aliases:
+        for match in re.finditer(rf"(?<!\w){re.escape(alias)}(?!\w)", lowered):
+            found = True
+            before = lowered[max(0, match.start() - 35):match.start()]
+            after = lowered[match.end():match.end() + 18]
+            negated = bool(re.search(
+                r"(?:\bno\b(?:\s+\w+){0,4}|"
+                r"\bnot\b(?:\s+\w+){0,3}|"
+                r"\bwithout\b(?:\s+\w+){0,3}|"
+                r"\bzero\b|\bnone\b)\s*$",
+                before,
+            ))
+            if alias == "impassable":
+                state = -1
+            elif negated or re.match(r"\s+(?:was|were)?\s*not\b", after):
+                state = -1
+            else:
+                state = 1
+    return state if found else 0
+
+def extract_numeric_facts(text):
+    lowered = (text or "").lower()
+    facts = {}
+    patterns = {
+        "magnitude": r"(?:magnitude|mag(?:nitude)?|m)\s*[-:]?\s*(\d(?:\.\d+)?)",
+        "temperature_c": r"(\d{2}(?:\.\d+)?)\s*°?\s*c\b",
+        "deaths": r"(\d+)\s+(?:people\s+)?(?:dead|deaths?|killed)",
+        "injuries": r"(\d+)\s+(?:people\s+)?(?:injured|injuries)",
+    }
+    for key, pattern in patterns.items():
+        match = re.search(pattern, lowered)
+        if match:
+            facts[key] = float(match.group(1))
+    return facts
+
+def assess_evidence_item(claim, item, context):
+    text = " ".join((item.get("title", "") or "", item.get("content", "") or ""))
+    claim_token_set = normalized_tokens(claim)
+    text_token_set = normalized_tokens(text)
+    overlap = len(claim_token_set & text_token_set) / max(1, min(len(claim_token_set), 12))
+    relevance = item.get("relevance_score")
+    try:
+        relevance = float(relevance)
+    except (TypeError, ValueError):
+        relevance = overlap
+
+    location = context.get("location")
+    location_match = None
+    if location:
+        location_words = [
+            word for word in re.findall(r"[a-z0-9]+", location.lower())
+            if len(word) >= 3 and word not in {"north", "south", "east", "west"}
+        ]
+        location_match = bool(location_words) and any(word in text.lower() for word in location_words)
+        relevance += 0.18 if location_match else -0.2
+
+    claim_type = context.get("claim_type", "other")
+    type_keywords = dict(CONTEXT_TYPE_KEYWORDS).get(claim_type, ())
+    type_match = bool(type_keywords) and any(keyword in text.lower() for keyword in type_keywords)
+    if type_keywords:
+        relevance += 0.14 if type_match else -0.16
+    relevance = max(0.0, min(1.0, relevance))
+
+    contradiction_reasons = []
+    support_reasons = []
+    claimed_state_concepts = set()
+    supported_state_concepts = set()
+    for concept, aliases in STATE_CONCEPTS.items():
+        claim_state = concept_state(claim, aliases)
+        evidence_state = concept_state(text, aliases)
+        if claim_state:
+            claimed_state_concepts.add(concept)
+        if claim_state and evidence_state:
+            if claim_state == evidence_state:
+                support_reasons.append(concept)
+                supported_state_concepts.add(concept)
+            else:
+                contradiction_reasons.append(concept)
+    claim_lower = claim.lower()
+    evidence_lower = text.lower()
+    for positive_aliases, negative_aliases in ANTONYM_STATES:
+        claim_positive = any(alias in claim_lower for alias in positive_aliases)
+        claim_negative = any(alias in claim_lower for alias in negative_aliases)
+        evidence_positive = any(alias in evidence_lower for alias in positive_aliases)
+        evidence_negative = any(alias in evidence_lower for alias in negative_aliases)
+        if (claim_positive and evidence_negative) or (claim_negative and evidence_positive):
+            contradiction_reasons.append(f"{positive_aliases[0]}_state")
+        elif (claim_positive and evidence_positive) or (claim_negative and evidence_negative):
+            support_reasons.append(f"{positive_aliases[0]}_state")
+            supported_state_concepts.add(f"{positive_aliases[0]}_state")
+
+    claim_numbers = extract_numeric_facts(claim)
+    evidence_numbers = extract_numeric_facts(text)
+    tolerances = {"magnitude": 0.25, "temperature_c": 2.0, "deaths": 0.0, "injuries": 0.0}
+    for key, claim_value in claim_numbers.items():
+        if key not in evidence_numbers:
+            continue
+        if abs(claim_value - evidence_numbers[key]) <= tolerances[key]:
+            support_reasons.append(key)
+        else:
+            contradiction_reasons.append(key)
+
+    direct_match = bool(support_reasons or (location_match is not False and type_match and relevance >= 0.42))
+    if contradiction_reasons:
+        stance = -(0.45 + relevance * 0.5)
+    elif claimed_state_concepts and not supported_state_concepts:
+        # Matching the event, place, or magnitude is only partial evidence when
+        # the claim also asserts damage/casualties/closure/etc.
+        stance = 0.05 + relevance * 0.18
+    elif direct_match:
+        stance = 0.35 + relevance * 0.6
+    elif relevance >= 0.32:
+        stance = 0.12 + relevance * 0.25
+    else:
+        stance = 0.0
+    stance = max(-1.0, min(1.0, stance))
+
+    trust = EVIDENCE_TRUST.get(item.get("source_type", "unknown"), 0.3)
+    mentioned_years = [int(year) for year in re.findall(r"\b(?:19\d{2}|20\d{2})\b", claim)]
+    current_claim = not any(year < datetime.now(timezone.utc).year for year in mentioned_years)
+    freshness = evidence_freshness(item, current_claim=current_claim)
+    weight = trust * relevance * freshness
+    return {
+        "url": item.get("url", ""),
+        "title": item.get("title", "Source"),
+        "stance": round(stance, 3),
+        "relevance": round(relevance, 3),
+        "freshness": round(freshness, 3),
+        "trust": round(trust, 3),
+        "weight": round(weight, 4),
+        "support_reasons": support_reasons,
+        "contradiction_reasons": contradiction_reasons,
+    }
+
+def judge_evidence_deterministically(claim, evidence):
+    context = extract_context_fallback(claim)
+    assessments = [assess_evidence_item(claim, item, context) for item in evidence or []]
+    useful = [item for item in assessments if item["relevance"] >= 0.18 and item["weight"] > 0.03]
+    if not useful:
+        return {
+            "score": 25,
+            "reasoning": "No sufficiently relevant and timely evidence was found for the exact claim.",
+            "status": "Uncertain",
+            "evidence_assessments": assessments,
+        }
+
+    support = sum(item["weight"] * max(0, item["stance"]) for item in useful)
+    contradiction = sum(item["weight"] * max(0, -item["stance"]) for item in useful)
+    neutral = sum(item["weight"] * (1 - abs(item["stance"])) for item in useful)
+    denominator = support + contradiction + neutral * 0.8
+    signed_ratio = (support - contradiction) / max(0.001, denominator)
+    score = round(max(5, min(95, 50 + signed_ratio * 45)))
+
+    reliable_support = [
+        item for item in useful
+        if item["stance"] >= 0.35 and item["trust"] >= 0.68 and item["freshness"] >= 0.5
+    ]
+    reliable_contradiction = [
+        item for item in useful
+        if item["stance"] <= -0.35 and item["trust"] >= 0.68 and item["freshness"] >= 0.5
+    ]
+    if reliable_support and reliable_contradiction:
+        status = "Disputed"
+    elif score >= 70 and (len(reliable_support) >= 2 or any(i["trust"] >= 0.95 for i in reliable_support)):
+        status = "Verified"
+    elif reliable_contradiction and not reliable_support:
+        status = "False"
+        score = min(score, 25)
+    else:
+        status = "Uncertain"
+
+    newest = max((item["freshness"] for item in useful), default=0)
+    reasoning = (
+        f"Assessed {len(useful)} relevant source(s): {len(reliable_support)} reliable support, "
+        f"{len(reliable_contradiction)} reliable contradiction. "
+        f"Newest-evidence freshness was {round(newest * 100)}%. "
+    )
+    if status == "Verified":
+        reasoning += "Recent, reliable evidence supports the exact claim."
+    elif status == "False":
+        reasoning += "Recent, reliable evidence contradicts a concrete claim detail."
+    elif status == "Disputed":
+        reasoning += "Recent reliable sources materially disagree."
+    else:
+        reasoning += "The evidence is not specific or strong enough for a definitive verdict."
+    return {
+        "score": score,
+        "reasoning": reasoning,
+        "status": status,
+        "evidence_assessments": assessments,
+    }
+
 def judge_fallback(claim, evidence):
     """Deterministic evidence-based scorer used when the AI judge is unavailable."""
     claim_lower = claim.lower()
+
+    sports_result = judge_sports_result(claim, evidence)
+    if sports_result:
+        return sports_result
 
     false_indicators = ["flat earth", "vaccine autism", "moon landing fake", "5g covid", "chemtrails"]
     true_indicators = ["earth revolves", "climate change", "evolution", "gravity", "round earth"]
@@ -591,86 +1026,49 @@ def judge_fallback(claim, evidence):
             "status": "Verified"
         }
 
-    stopwords = {
-        "about", "after", "again", "against", "also", "and", "are", "as", "at",
-        "be", "been", "before", "but", "by", "for", "from", "had", "has", "have",
-        "in", "into", "is", "it", "its", "near", "of", "on", "or", "some",
-        "that", "the", "their", "there", "this", "to", "toward", "was", "were",
-        "with",
-    }
-    claim_tokens = {
-        w for w in re.findall(r"[a-z0-9]+", claim_lower)
-        if len(w) >= 3 and w not in stopwords
-    }
-    trust = {
-        "government": 1.0, "education": 0.95, "research": 0.9,
-        "fact_check": 0.9, "news_reputable": 0.85, "encyclopedia": 0.7,
-        "news": 0.68, "general": 0.45, "unknown": 0.35,
-    }
-    contradiction_terms = (
-        "false", "fake", "hoax", "debunk", "no evidence", "did not",
-        "has not", "denied", "incorrect", "misleading",
-    )
+    return judge_evidence_deterministically(claim, evidence)
 
-    assessed = []
-    for item in evidence or []:
-        text = " ".join((
-            item.get("title", "") or "",
-            item.get("content", "") or "",
-        )).lower()
-        text_tokens = set(re.findall(r"[a-z0-9]+", text))
-        overlap = len(claim_tokens & text_tokens)
-        relevance = overlap / max(1, min(len(claim_tokens), 10))
-        source_trust = trust.get(item.get("source_type", "unknown"), 0.4)
-        contradicts = relevance >= 0.2 and any(term in text for term in contradiction_terms)
-        assessed.append((relevance, source_trust, contradicts))
+def build_verdict_sources(claim, evidence, verdict):
+    """Expose the judge's source-level reasoning to the UI."""
+    assessments = verdict.get("evidence_assessments") or []
+    by_url = {item.get("url", ""): item for item in assessments if item.get("url")}
+    sources = []
+    for item in evidence[:12]:
+        assessment = by_url.get(item.get("url", ""), {})
+        sources.append({
+            "title": item.get("title", "Source"),
+            "url": item.get("url", ""),
+            "excerpt": make_excerpt(item.get("content", ""), claim),
+            "source_type": item.get("source_type", "general"),
+            "published": item.get("published", ""),
+            "publisher": item.get("publisher", ""),
+            "provider": item.get("provider", ""),
+            "stance": assessment.get("stance"),
+            "relevance": assessment.get("relevance", item.get("relevance_score")),
+            "freshness": assessment.get("freshness", item.get("freshness_score")),
+            "trust": assessment.get("trust"),
+            "support_reasons": assessment.get("support_reasons", []),
+            "contradiction_reasons": assessment.get("contradiction_reasons", []),
+        })
+    return sources
 
-    relevant = [a for a in assessed if a[0] >= 0.15]
-    supporting = [a for a in relevant if not a[2]]
-    contradicting = [a for a in relevant if a[2]]
-
-    if not relevant:
-        return {
-            "score": 35,
-            "reasoning": "Sources were found, but they do not closely match the specific claim. More targeted evidence is needed.",
-            "status": "Uncertain",
+def build_search_results(search_results):
+    return [
+        {
+            "title": item.get("title", "Source"),
+            "url": item.get("url", ""),
+            "snippet": item.get("snippet", ""),
+            "source_type": item.get("source_type", "general"),
+            "published": item.get("published", ""),
+            "publisher": item.get("publisher", ""),
+            "provider": item.get("provider", ""),
+            "relevance": item.get("relevance_score"),
+            "freshness": item.get("freshness_score"),
+            "trust": item.get("trust_score"),
+            "rank_score": item.get("rank_score"),
         }
-
-    support_mass = sum(rel * src_trust for rel, src_trust, _ in supporting)
-    contradict_mass = sum(rel * src_trust for rel, src_trust, _ in contradicting)
-    avg_relevance = sum(rel for rel, _, _ in relevant) / len(relevant)
-    reliable_count = sum(1 for rel, src_trust, _ in relevant if src_trust >= 0.68 and rel >= 0.2)
-
-    score = 40
-    score += min(32, support_mass * 10)
-    score += min(16, reliable_count * 4)
-    score += min(12, avg_relevance * 18)
-    score -= min(35, contradict_mass * 14)
-    score = max(5, min(95, round(score)))
-
-    if contradict_mass > support_mass and score <= 35:
-        status = "False"
-    elif score >= 70 and reliable_count >= 2:
-        status = "Verified"
-    elif contradicting and supporting:
-        status = "Disputed"
-    else:
-        status = "Uncertain"
-
-    reasoning = (
-        f"{len(relevant)} relevant source(s) were assessed, including "
-        f"{reliable_count} higher-reliability source(s). "
-    )
-    if status == "Verified":
-        reasoning += "The available evidence substantially supports the claim."
-    elif status == "False":
-        reasoning += "The stronger available evidence contradicts the claim."
-    elif status == "Disputed":
-        reasoning += "The sources contain meaningful conflicting signals."
-    else:
-        reasoning += "The evidence is related but not strong or specific enough for verification."
-
-    return {"score": score, "reasoning": reasoning, "status": status}
+        for item in search_results[:12]
+    ]
 
 # ========== API ENDPOINTS ==========
 
@@ -704,20 +1102,10 @@ def evaluate():
 
         # Add source information (show all evidence the judge actually saw,
         # so the confirming news sources appear — not just the first few)
-        verdict["sources"] = [
-            {"title": e.get('title', 'Source'), "url": e.get('url', ''),
-             "excerpt": make_excerpt(e.get('content', ''), claim),
-             "source_type": e.get("source_type", "general")}
-            for e in evidence[:12]
-        ]
+        verdict["sources"] = build_verdict_sources(claim, evidence, verdict)
 
         # Add search results for transparency
-        verdict["search_results"] = [
-            {"title": s.get('title', 'Source'), "url": s.get('url', ''),
-             "snippet": s.get("snippet", ""),
-             "source_type": s.get("source_type", "general")}
-            for s in search_results[:12]
-        ]
+        verdict["search_results"] = build_search_results(search_results)
 
         print(f"✅ Score: {verdict['score']}/100 - {verdict['status']}")
         print(f"📚 Sources: {len(verdict['sources'])}")
@@ -770,18 +1158,8 @@ def evaluate_stream():
             yield sse({"stage": "judge", "status": "active"})
             verdict = judge_claim(claim, evidence)
             verdict["claim"] = claim
-            verdict["sources"] = [
-                {"title": e.get('title', 'Source'), "url": e.get('url', ''),
-                 "excerpt": make_excerpt(e.get('content', ''), claim),
-                 "source_type": e.get("source_type", "general")}
-                for e in evidence[:12]
-            ]
-            verdict["search_results"] = [
-                {"title": s.get('title', 'Source'), "url": s.get('url', ''),
-                 "snippet": s.get("snippet", ""),
-                 "source_type": s.get("source_type", "general")}
-                for s in search_results[:12]
-            ]
+            verdict["sources"] = build_verdict_sources(claim, evidence, verdict)
+            verdict["search_results"] = build_search_results(search_results)
             yield sse({"stage": "judge", "status": "done"})
 
             print(f"✅ [stream] Score: {verdict['score']}/100 - {verdict['status']}")

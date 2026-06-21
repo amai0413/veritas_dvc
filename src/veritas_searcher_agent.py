@@ -8,6 +8,7 @@ import html
 import xml.etree.ElementTree as ET
 from urllib.parse import quote
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 
 app = Flask(__name__)
 CORS(app)
@@ -15,6 +16,24 @@ CORS(app)
 # ========== AGENT IDENTITY ==========
 AGENT_NAME = "Veritas Searcher Agent"
 AGENT_VERSION = "2.0"
+
+PROVIDER_STATUS = {
+    "google_news": {"status": "unknown", "last_error": None, "last_count": 0},
+    "gdelt": {"status": "unknown", "last_error": None, "last_count": 0},
+    "duckduckgo": {"status": "unknown", "last_error": None, "last_count": 0},
+    "wikipedia": {"status": "unknown", "last_error": None, "last_count": 0},
+    "usgs": {"status": "unknown", "last_error": None, "last_count": 0},
+    "eonet": {"status": "unknown", "last_error": None, "last_count": 0},
+    "gdacs": {"status": "unknown", "last_error": None, "last_count": 0},
+}
+
+def record_provider(name, status, count=0, error=None):
+    PROVIDER_STATUS[name] = {
+        "status": status,
+        "last_error": str(error)[:180] if error else None,
+        "last_count": count,
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+    }
 
 # ========== HTTP HEADERS ==========
 # Wikipedia's API returns 403 to the default python-requests User-Agent,
@@ -85,21 +104,234 @@ TRUSTED_DOMAINS = [
     "politifact.com",
 ]
 
+SEARCH_TERM_CORRECTIONS = {
+    r"\btsunizia\b": "Tunisia",
+    r"\btunizia\b": "Tunisia",
+    r"\bworldcup\b": "World Cup",
+}
+
+SEARCH_STOPWORDS = {
+    "a", "an", "the", "and", "or", "of", "in", "on", "at", "to", "for",
+    "was", "were", "is", "are", "there", "that", "this", "with", "from",
+    "by", "as", "it", "its", "has", "have", "had", "reports", "report",
+    "immediate", "some", "parts", "country", "pushed", "toward",
+}
+
+HAZARD_GROUPS = {
+    "earthquake": {"earthquake", "quake", "aftershock", "seismic", "tremor", "magnitude"},
+    "wildfire": {"wildfire", "wildfires", "bushfire", "forest", "brushfire"},
+    "flood_storm": {"flood", "flooding", "storm", "hurricane", "typhoon", "cyclone", "tornado", "tsunami"},
+    "volcano": {"volcano", "volcanic", "eruption", "lava", "ash"},
+    "heat": {"heatwave", "heat", "temperature", "temperatures", "drought"},
+    "landslide": {"landslide", "mudslide", "avalanche"},
+}
+
+def normalize_search_claim(claim):
+    """Correct common entity typos and make sports-result queries direction-neutral."""
+    normalized = re.sub(r"\s+", " ", (claim or "")).strip()
+    for pattern, replacement in SEARCH_TERM_CORRECTIONS.items():
+        normalized = re.sub(pattern, replacement, normalized, flags=re.IGNORECASE)
+
+    match = re.match(
+        r"^\s*(.+?)\s+(?:won|lost|beat|defeated)\s+(?:against|to)?\s*(.+?)"
+        r"(?:\s+(?:for|in|at)\s+(?:the\s+)?world cup)?\s*$",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if match:
+        first = match.group(1).strip(" ,.")
+        second = match.group(2).strip(" ,.")
+        normalized = f"{first} {second} World Cup latest result"
+    return normalized
+
+def claim_tokens(text):
+    return {
+        token for token in re.findall(r"[a-z0-9]+", (text or "").lower())
+        if len(token) >= 3 and token not in SEARCH_STOPWORDS
+    }
+
+def claim_hazard_group(text, incident_type=None):
+    itype = (incident_type or "").lower()
+    if itype in HAZARD_GROUPS:
+        return itype
+    lowered = (text or "").lower()
+    for group, words in HAZARD_GROUPS.items():
+        if any(re.search(rf"(?<!\w){re.escape(word)}(?!\w)", lowered) for word in words):
+            return group
+    if itype == "other_disaster":
+        return "other_disaster"
+    return None
+
+def explicit_historical_date(text):
+    years = [int(y) for y in re.findall(r"\b(19\d{2}|20\d{2})\b", text or "")]
+    current_year = datetime.now(timezone.utc).year
+    return any(year < current_year for year in years)
+
+def compact_search_query(claim, incident_type=None):
+    normalized = normalize_search_claim(claim)
+    tokens = re.findall(r"[A-Za-z0-9À-ÖØ-öø-ÿ.'’-]+", normalized)
+    keep = [token for token in tokens if token.lower() not in SEARCH_STOPWORDS]
+    hazard = claim_hazard_group(normalized, incident_type)
+    if hazard and hazard != "other_disaster":
+        canonical = {
+            "earthquake": "earthquake",
+            "wildfire": "wildfire",
+            "flood_storm": "flood storm",
+            "volcano": "volcano eruption",
+            "heat": "heat wave",
+            "landslide": "landslide",
+        }[hazard]
+        query = " ".join(keep[:9])
+        if canonical.split()[0] not in query.lower():
+            query = f"{query} {canonical}"
+        return re.sub(r"\s+", " ", query).strip()
+    return " ".join(keep[:10]) or normalized
+
+def build_search_queries(claim, incident_type=None):
+    normalized = normalize_search_claim(claim)
+    compact = compact_search_query(normalized, incident_type)
+    queries = [normalized]
+    if compact.lower() != normalized.lower():
+        queries.append(compact)
+    hazard = claim_hazard_group(normalized, incident_type)
+    if hazard and not explicit_historical_date(normalized):
+        queries.append(f"{compact} when:30d")
+    deduped = []
+    seen = set()
+    for query in queries:
+        key = query.lower()
+        if key not in seen:
+            seen.add(key)
+            deduped.append(query)
+    return deduped[:3]
+
+def parse_source_datetime(value):
+    if not value:
+        return None
+    try:
+        if re.fullmatch(r"\d{8}T\d{6}Z", value):
+            return datetime.strptime(value, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+        parsed = parsedate_to_datetime(value)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except Exception:
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return parsed.astimezone(timezone.utc)
+        except Exception:
+            return None
+
+def freshness_score(result, time_sensitive=True):
+    published = parse_source_datetime(result.get("published") or result.get("published_at"))
+    if not published:
+        return 0.72 if result.get("source_type") == "government" else 0.28
+    age_hours = max(0.0, (datetime.now(timezone.utc) - published).total_seconds() / 3600)
+    if not time_sensitive:
+        return 0.75
+    if age_hours <= 24:
+        return 1.0
+    if age_hours <= 72:
+        return 0.9
+    if age_hours <= 24 * 7:
+        return 0.78
+    if age_hours <= 24 * 30:
+        return 0.58
+    if age_hours <= 24 * 180:
+        return 0.32
+    return 0.12
+
+def result_relevance(result, claim, incident_type=None):
+    text = " ".join((
+        result.get("title", "") or "",
+        result.get("snippet", "") or "",
+        result.get("publisher", "") or "",
+    )).lower()
+    tokens = claim_tokens(normalize_search_claim(claim))
+    text_tokens = set(re.findall(r"[a-z0-9]+", text))
+    overlap = len(tokens & text_tokens) / max(1, min(len(tokens), 10))
+
+    hazard = claim_hazard_group(claim, incident_type)
+    hazard_bonus = 0.0
+    if hazard in HAZARD_GROUPS:
+        hazard_bonus = 0.22 if any(word in text_tokens for word in HAZARD_GROUPS[hazard]) else -0.22
+
+    location_words = location_keywords(claim)
+    location_bonus = 0.0
+    if location_words:
+        matched = sum(1 for word in location_words if word in text)
+        location_bonus = min(0.30, matched / len(location_words) * 0.30)
+        if matched == 0:
+            location_bonus = -0.20
+
+    claim_numbers = set(re.findall(r"\b\d+(?:\.\d+)?\b", claim))
+    number_bonus = 0.0
+    if claim_numbers and any(number in text for number in claim_numbers):
+        number_bonus = 0.15
+    return max(0.0, min(1.0, overlap + hazard_bonus + location_bonus + number_bonus))
+
+TRUST_SCORE = {
+    "government": 1.0, "education": 0.95, "fact_check": 0.9,
+    "research": 0.86, "news_reputable": 0.84, "encyclopedia": 0.68,
+    "news": 0.62, "general": 0.42, "unknown": 0.30,
+}
+
+def rank_results(results, claim, incident_type=None):
+    time_sensitive = not explicit_historical_date(claim)
+    hazard = claim_hazard_group(claim, incident_type)
+    ranked = []
+    for result in results:
+        relevance = result_relevance(result, claim, incident_type)
+        freshness = freshness_score(result, time_sensitive=time_sensitive)
+        trust = TRUST_SCORE.get(result.get("source_type", "unknown"), 0.3)
+        result["relevance_score"] = round(relevance, 3)
+        result["freshness_score"] = round(freshness, 3)
+        result["trust_score"] = round(trust * 100)
+        # Dynamic disaster claims demand both topical match and recency.
+        if hazard and result.get("source_type") not in {"government"} and relevance < 0.18:
+            continue
+        if hazard and result.get("source_type") == "encyclopedia" and relevance < 0.55:
+            continue
+        result["rank_score"] = round(
+            trust * 0.38 + relevance * 0.37 + freshness * 0.25, 4
+        )
+        ranked.append(result)
+    return sorted(
+        ranked,
+        key=lambda row: (
+            row.get("rank_score", 0),
+            parse_source_datetime(row.get("published") or row.get("published_at"))
+            or datetime.min.replace(tzinfo=timezone.utc),
+        ),
+        reverse=True,
+    )
+
 # ========== SEARCH FUNCTION (routes authoritative feeds by incident type) ==========
 def search_web(claim, search_engine='duckduckgo', incident_type=None):
     """Search multiple sources, routing authoritative hazard feeds by the
     incident type (and claim keywords), always backed by the latest news."""
+    queries = build_search_queries(claim, incident_type)
+    search_claim = queries[0]
+    if search_claim != claim or len(queries) > 1:
+        print(f"✏️ Search queries: {queries}")
     all_results = []
     itype = (incident_type or "").lower()
-    cl = claim.lower()
+    cl = search_claim.lower()
+    detected_hazard = claim_hazard_group(search_claim, incident_type)
     def has(words):
         return any(w in cl for w in words)
 
     want_eq = itype == "earthquake" or has(["earthquake", "quake", "seismic", "magnitude", "tremor", "aftershock"])
     want_fire = itype == "wildfire" or has(["wildfire", "bushfire", "forest fire", "brush fire"])
     want_volcano = itype == "volcano" or has(["volcano", "eruption", "volcanic", "lava", "ash cloud"])
-    want_storm = itype in ("flood_storm", "other_disaster") or has(["flood", "cyclone", "hurricane", "typhoon", "storm surge", "tsunami", "landslide", "drought"])
-    want_disaster_feed = want_fire or want_volcano or want_storm or itype == "other_disaster"
+    want_storm = itype == "flood_storm" or has(["flood", "cyclone", "hurricane", "typhoon", "storm surge", "tsunami", "landslide", "drought"])
+    # EONET/GDACS do not provide a useful heat-wave feed. Querying every
+    # disaster type for a heat claim injects unrelated floods from the same
+    # country, so route these feeds only when their event categories apply.
+    want_disaster_feed = (
+        want_fire or want_volcano or want_storm
+        or (itype == "other_disaster" and detected_hazard not in {"heat"})
+    )
 
     # 1) Authoritative hazard feeds, routed by incident type / keywords (no key)
     if want_eq:
@@ -108,7 +340,8 @@ def search_web(claim, search_engine='duckduckgo', incident_type=None):
             print(f"🌎 USGS found {len(usgs)} matching events")
         all_results.extend(usgs)
     if want_disaster_feed:
-        eonet = search_eonet(claim, itype)
+        feed_type = detected_hazard if detected_hazard in EONET_CATEGORIES else itype
+        eonet = search_eonet(claim, feed_type)
         if eonet:
             print(f"🛰️ NASA EONET found {len(eonet)} events")
         all_results.extend(eonet)
@@ -117,33 +350,35 @@ def search_web(claim, search_engine='duckduckgo', incident_type=None):
             print(f"🚨 GDACS found {len(gdacs)} alerts")
         all_results.extend(gdacs)
 
-    # 2) Latest news articles via Google News RSS (no key) — always
-    news = search_google_news(claim)
-    print(f"📰 Google News found {len(news)} results")
+    # 2) Latest news via multiple query shapes. The normalized full claim
+    # preserves detail; the compact/time-bounded query improves recall.
+    news = []
+    for query in queries:
+        news.extend(search_google_news(query))
+    news = remove_duplicates(news)
+    print(f"📰 Google News found {len(news)} unique results")
     all_results.extend(news)
 
     # 2b) GDELT — real article URLs (best-effort; skipped on rate-limit)
-    gdelt = search_gdelt(claim)
+    gdelt = search_gdelt(compact_search_query(search_claim, incident_type))
     if gdelt:
         print(f"🌐 GDELT found {len(gdelt)} results")
     all_results.extend(gdelt)
 
     # 3) DuckDuckGo instant answers (encyclopedic only)
     if search_engine in ['duckduckgo', 'all']:
-        ddg = search_duckduckgo(claim)
+        ddg = search_duckduckgo(search_claim)
         all_results.extend(ddg)
         print(f"🔍 DuckDuckGo found {len(ddg)} total results")
 
     # 4) Wikipedia for general / historical knowledge
-    wiki = search_wikipedia(claim)
+    wiki = search_wikipedia(search_claim)
     all_results.extend(wiki)
     print(f"📚 Wikipedia found {len(wiki)} results")
 
-    # Remove duplicates
+    # Remove duplicates and score by trust + topical relevance + freshness.
     unique_results = remove_duplicates(all_results)
-
-    # Sort by trustworthiness (puts .gov / USGS / hazard feeds first)
-    sorted_results = sort_by_trustworthiness(unique_results)
+    sorted_results = rank_results(unique_results, claim, incident_type)
 
     # Return a balanced mix so the LATEST NEWS is never crowded out by
     # authoritative + encyclopedic sources filling every slot.
@@ -165,7 +400,7 @@ def diversify_results(sorted_results, limit=14):
     # quotas: authoritative ground-truth, lots of latest news, then background.
     # "other" often holds news from outlets whose name we couldn't map to a
     # domain, so it gets a generous quota too.
-    for bucket, quota in ((gov, 4), (news, 8), (enc, 2), (other, 6)):
+    for bucket, quota in ((gov, 5), (news, 10), (enc, 1), (other, 4)):
         for r in bucket[:quota]:
             if r["url"] not in seen:
                 picked.append(r); seen.add(r["url"])
@@ -194,6 +429,7 @@ def search_duckduckgo(query):
         }
 
         response = requests.get(url, params=params, headers=HTTP_HEADERS, timeout=10)
+        response.raise_for_status()
         data = response.json()
 
         results = []
@@ -217,9 +453,11 @@ def search_duckduckgo(query):
                     "source_type": get_source_type(topic.get('FirstURL', ''))
                 })
 
+        record_provider("duckduckgo", "online", len(results))
         return results
 
     except Exception as e:
+        record_provider("duckduckgo", "degraded", 0, e)
         print(f"❌ DuckDuckGo search error: {e}")
         return []
 
@@ -239,6 +477,7 @@ def search_wikipedia(claim):
         }
 
         response = requests.get(url, params=params, headers=HTTP_HEADERS, timeout=10)
+        response.raise_for_status()
         data = response.json()
 
         results = []
@@ -252,9 +491,11 @@ def search_wikipedia(claim):
                 "source_type": "encyclopedia"
             })
 
+        record_provider("wikipedia", "online", len(results))
         return results
 
     except Exception as e:
+        record_provider("wikipedia", "degraded", 0, e)
         print(f"❌ Wikipedia search error: {e}")
         return []
 
@@ -267,6 +508,7 @@ def search_google_news(claim):
         url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
         response = requests.get(url, headers=HTTP_HEADERS, timeout=10)
         if response.status_code != 200:
+            record_provider("google_news", "degraded", 0, f"HTTP {response.status_code}")
             print(f"❌ Google News returned status {response.status_code}")
             return []
 
@@ -287,11 +529,14 @@ def search_google_news(claim):
                 "snippet": (f"[{publisher}] " if publisher else "") + snippet,
                 "published": pub,
                 "publisher": publisher,
-                "source_type": classify_news_publisher(publisher)
+                "source_type": classify_news_publisher(publisher),
+                "provider": "Google News",
             })
+        record_provider("google_news", "online", len(results))
         return results
 
     except Exception as e:
+        record_provider("google_news", "degraded", 0, e)
         print(f"❌ Google News search error: {e}")
         return []
 
@@ -324,6 +569,7 @@ def search_gdelt(claim):
         r = requests.get("https://api.gdeltproject.org/api/v2/doc/doc",
                          params=params, headers=HTTP_HEADERS, timeout=6)
         if r.status_code != 200 or not r.text.strip().startswith("{"):
+            record_provider("gdelt", "degraded", 0, f"HTTP {r.status_code}")
             print(f"⚠️ GDELT unavailable (status {r.status_code}); skipping")
             return []
         articles = r.json().get("articles", []) or []
@@ -338,9 +584,12 @@ def search_gdelt(claim):
                 "snippet": f"[{a.get('domain','')}] {a.get('title','')}".strip(),
                 "published": a.get("seendate", ""),
                 "source_type": get_source_type(url) if get_source_type(url) != "general" else "news",
+                "provider": "GDELT",
             })
+        record_provider("gdelt", "online", len(results))
         return results
     except Exception as e:
+        record_provider("gdelt", "degraded", 0, e)
         print(f"⚠️ GDELT search error: {e}; skipping")
         return []
 
@@ -375,8 +624,8 @@ def search_usgs_earthquakes(claim):
         params = {
             "format": "geojson",
             "starttime": (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%d"),
-            "orderby": "magnitude",
-            "limit": 20,
+            "orderby": "time",
+            "limit": 50,
         }
         mag_match = re.search(r'(?:magnitude|mag|m)\s*[- ]?\s*(\d(?:\.\d+)?)', claim_lower)
         if mag_match:
@@ -389,6 +638,7 @@ def search_usgs_earthquakes(claim):
         r = requests.get("https://earthquake.usgs.gov/fdsnws/event/1/query",
                          params=params, headers=HTTP_HEADERS, timeout=12)
         if r.status_code != 200:
+            record_provider("usgs", "degraded", 0, f"HTTP {r.status_code}")
             print(f"❌ USGS returned status {r.status_code}")
             return []
 
@@ -407,6 +657,8 @@ def search_usgs_earthquakes(claim):
                 "url": p.get("url", "https://earthquake.usgs.gov/earthquakes/"),
                 "snippet": f"USGS officially recorded a magnitude {mag} earthquake at {place} on {when}.",
                 "source_type": "government",
+                "published": datetime.fromtimestamp(t / 1000, timezone.utc).isoformat() if t else "",
+                "provider": "USGS",
                 "_place": place.lower()
             }
 
@@ -414,15 +666,18 @@ def search_usgs_earthquakes(claim):
         if loc_words:
             # a location was named — only return events that actually match it,
             # otherwise stay silent rather than injecting unrelated quakes
-            chosen = [s for s in sources if any(w in s["_place"] for w in loc_words)]
+            chosen = [s for s in sources if all(w in s["_place"] for w in loc_words)]
         else:
             # no location named — surface the most significant recent events
             chosen = sources[:5]
         for s in chosen:
             s.pop("_place", None)
-        return chosen[:5]
+        chosen = chosen[:8]
+        record_provider("usgs", "online", len(chosen))
+        return chosen
 
     except Exception as e:
+        record_provider("usgs", "degraded", 0, e)
         print(f"❌ USGS search error: {e}")
         return []
 
@@ -442,6 +697,7 @@ def search_eonet(claim, incident_type=None):
                          params={"status": "open", "days": "120", "limit": "100"},
                          headers=HTTP_HEADERS, timeout=8)
         if r.status_code != 200:
+            record_provider("eonet", "degraded", 0, f"HTTP {r.status_code}")
             print(f"⚠️ EONET status {r.status_code}; skipping")
             return []
         events = r.json().get("events", []) or []
@@ -461,9 +717,14 @@ def search_eonet(claim, incident_type=None):
                 "url": src,
                 "snippet": f"NASA EONET is tracking an active natural event: {title} (category: {', '.join(ecats) or 'natural'}).",
                 "source_type": "government",
+                "published": ((e.get("geometry") or [{}])[-1].get("date") or ""),
+                "provider": "NASA EONET",
             })
-        return results[:5]
+        results = results[:8]
+        record_provider("eonet", "online", len(results))
+        return results
     except Exception as e:
+        record_provider("eonet", "degraded", 0, e)
         print(f"⚠️ EONET error: {e}; skipping")
         return []
 
@@ -474,6 +735,7 @@ def search_gdacs(claim, incident_type=None):
         print(f"🚨 Searching GDACS for: {claim}")
         r = requests.get("https://www.gdacs.org/xml/rss.xml", headers=HTTP_HEADERS, timeout=8)
         if r.status_code != 200:
+            record_provider("gdacs", "degraded", 0, f"HTTP {r.status_code}")
             print(f"⚠️ GDACS status {r.status_code}; skipping")
             return []
         root = ET.fromstring(r.content)
@@ -493,9 +755,14 @@ def search_gdacs(claim, incident_type=None):
                 "url": link,
                 "snippet": snippet,
                 "source_type": "government",
+                "published": item.findtext("pubDate", "") or "",
+                "provider": "GDACS",
             })
-        return results[:5]
+        results = results[:8]
+        record_provider("gdacs", "online", len(results))
+        return results
     except Exception as e:
+        record_provider("gdacs", "degraded", 0, e)
         print(f"⚠️ GDACS error: {e}; skipping")
         return []
 
@@ -637,10 +904,9 @@ def search():
         # Perform search
         results = search_web(claim, search_engine, incident_type)
 
-        # If no results, use mock
+        # Never manufacture evidence for an unknown claim.
         if not results:
-            print("⚠️ No results found, using mock data")
-            results = mock_search_results(claim)
+            print("⚠️ No real search results found")
 
         # Count trustworthy sources
         trusted_count = len([r for r in results if r.get('source_type') in ['government', 'education']])
@@ -679,7 +945,7 @@ def search_trusted():
         results = search_web(claim, 'duckduckgo')
 
         if not results:
-            results = mock_search_results(claim)
+            print("⚠️ No real trusted search results found")
 
         # Count .edu and .gov sources
         edu_gov = [r for r in results if r.get('source_type') in ['government', 'education']]
@@ -709,11 +975,14 @@ def engines():
 
 @app.route('/health', methods=['GET'])
 def health():
+    critical = PROVIDER_STATUS.get("google_news", {})
+    status = "degraded" if critical.get("status") == "degraded" else "alive"
     return jsonify({
         "agent": AGENT_NAME,
         "version": AGENT_VERSION,
-        "status": "alive",
-        "message": "Ready to search with real URLs!"
+        "status": status,
+        "providers": PROVIDER_STATUS,
+        "message": "Ready to search current authoritative feeds and news."
     })
 
 @app.route('/info', methods=['GET'])
@@ -743,8 +1012,6 @@ if __name__ == '__main__':
     print("   3. Research & Fact-checking")
     print("   4. Reputable News")
     print("   5. Other sources")
-    print("="*50)
-    print("📚 Mock data now uses REAL working URLs (Wikipedia, CDC, NASA, etc.)")
     print("="*50)
     print("⚡ Ready to search!\n")
 
