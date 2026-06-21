@@ -145,7 +145,7 @@ export const VERDICT_LABEL: Record<ClaimStatus, string> = {
   false: "Contradicted",
   disputed: "Misleading",
   uncertain: "Uncertain",
-  opinion: "Opinion",
+  opinion: "Unverifiable",
 };
 
 export const STATUS_BLURB: Record<ClaimStatus, string> = {
@@ -153,5 +153,5 @@ export const STATUS_BLURB: Record<ClaimStatus, string> = {
   false: "AI evidence and human consensus agree this is false.",
   disputed: "The AI and the crowd disagree — judge the evidence yourself.",
   uncertain: "The evidence is contested; the system is flagging this honestly.",
-  opinion: "This is an opinion or value judgment — not a factual claim evidence can prove true or false.",
+  opinion: "This input can't be assessed against evidence (e.g. gibberish or a bare keyword).",
 };
